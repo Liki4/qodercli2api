@@ -1,0 +1,14 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8377",
+    "ANTHROPIC_AUTH_TOKEN": "sk-test-qoder2api-secret",
+    "ANTHROPIC_MODEL": "auto",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "auto",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "auto",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "auto",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "auto",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_UPDATES": "1"
+  },
+  "model": "auto"
+}

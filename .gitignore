@@ -1,0 +1,21 @@
+# built binary
+qodercli2api
+# reverse engineering target (133MB, proprietary)
+qodercli-1.1.5
+# local secrets & credentials
+qodercli2api.env
+re/secrets/
+# large derived artifacts (regenerable)
+re/extracted/
+re/venv/
+# test scratch
+re/projtest/
+*.log
+
+# qodercli local settings for this dir
+.qoder/
+# python cache
+__pycache__/
+# codex test home (keep only config.toml as example)
+re/codex-home/*
+!re/codex-home/config.toml

@@ -1,0 +1,10 @@
+model = "ultimate"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+model_provider = "q2a"
+
+[model_providers.q2a]
+name = "qoder2api"
+base_url = "http://127.0.0.1:8377/v1"
+wire_api = "responses"
+env_key = "Q2A_API_KEY"
