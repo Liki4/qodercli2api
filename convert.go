@@ -340,10 +340,13 @@ func buildUpstreamBody(req *anthropicRequest, mc *modelConfig, sessionID, reques
 		params["context_length"] = mc.MaxInputTokens
 	}
 	if req.Thinking != nil {
-		if req.Thinking.Type == "enabled" {
+		switch req.Thinking.Type {
+		case "enabled":
 			params["reasoning_effort"] = budgetToEffort(req.Thinking.BudgetTokens)
-		} else {
+		case "disabled":
 			params["reasoning_effort"] = "none"
+		default:
+			// adaptive 等类型：不下发 reasoning_effort，由上游自行决定
 		}
 	}
 	if tc := toolChoiceToUpstream(req.ToolChoice); tc != nil {

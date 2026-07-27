@@ -122,7 +122,7 @@ func main() {
 	}
 	always("model keys available: %s", strings.Join(resolver.keys(), ", "))
 	always("listening on %s (sk=%s)", *addr, skPrint)
-	srv := &http.Server{Addr: *addr, Handler: s.routes()}
+	srv := &http.Server{Addr: *addr, Handler: s.handler()}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

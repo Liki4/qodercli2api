@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"sync"
 )
 
@@ -150,28 +152,22 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
+	effort := ""
+	if req2 := areq.Thinking; req2 != nil {
+		effort = fmt.Sprintf(" thinking=%s/%d", req2.Type, req2.BudgetTokens)
+	}
+	s.logf("req %s model=%s->%s stream=%v bytes=%d msgs=%d tools=%d%s", requestID[:8], areq.Model, mc.Key, areq.Stream, len(raw), len(areq.Messages), len(areq.Tools), effort)
 
-	resp, err := s.doUpstream(r.Context(), body, mc)
+	resp, err := s.callUpstream(r.Context(), body, mc, requestID[:8])
 	if err != nil {
-		s.logf("upstream error: %v", err)
+		s.logf("req %s upstream error: %v", requestID[:8], err)
 		writeAnthropicError(w, 502, "api_error", "upstream request failed: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == 401 {
-		io.Copy(io.Discard, resp.Body)
-		if rerr := s.auth.forceRefresh(r.Context()); rerr == nil {
-			resp2, err2 := s.doUpstream(r.Context(), body, mc)
-			if err2 == nil {
-				defer resp2.Body.Close()
-				resp = resp2
-			}
-		}
-	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		s.logf("upstream status %d: %s", resp.StatusCode, truncate(string(b), 300))
+		s.logf("req %s upstream final status %d: %s", requestID[:8], resp.StatusCode, truncate(string(b), 500))
 		writeAnthropicError(w, resp.StatusCode, "api_error", fmt.Sprintf("upstream status %d: %s", resp.StatusCode, truncate(string(b), 300)))
 		return
 	}
@@ -181,6 +177,122 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	} else {
 		s.collectAnthropic(w, resp.Body, &areq, requestID)
 	}
+}
+
+func retryableStatus(code int) bool {
+	return code == 408 || code == 429 || (code >= 500 && code < 600)
+}
+
+// queueWait extracts server-provided wait time from a queued/overload body.
+// Upstream signals queueing with {"code":"10605",...} or {"queue":{"isQueued":true,"waitTime":ms}}.
+func queueWait(body []byte) (time.Duration, bool) {
+	var parsed struct {
+		Code         string `json:"code"`
+		RetryAfterMs int64  `json:"retryAfterMs"`
+		Queue        *struct {
+			IsQueued bool  `json:"isQueued"`
+			WaitTime int64 `json:"waitTime"`
+		} `json:"queue"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return 0, false
+	}
+	if parsed.Queue != nil && parsed.Queue.IsQueued {
+		ms := parsed.Queue.WaitTime
+		if ms <= 0 {
+			ms = parsed.RetryAfterMs
+		}
+		if ms <= 0 {
+			ms = 2000
+		}
+		return time.Duration(ms) * time.Millisecond, true
+	}
+	if parsed.Code == "10605" {
+		ms := parsed.RetryAfterMs
+		if ms <= 0 {
+			ms = 2000
+		}
+		return time.Duration(ms) * time.Millisecond, true
+	}
+	return 0, false
+}
+
+func errorResponse(orig *http.Response, body []byte) *http.Response {
+	return &http.Response{
+		Status:        orig.Status,
+		StatusCode:    orig.StatusCode,
+		Header:        orig.Header,
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       orig.Request,
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// callUpstream performs the upstream call with retries for auth expiry,
+// rate limits, gateway errors and server-side queueing.
+func (s *server) callUpstream(ctx context.Context, body []byte, mc *modelConfig, rid string) (*http.Response, error) {
+	const maxAttempts = 4
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := s.doUpstream(ctx, body, mc)
+		if err != nil {
+			if attempt < maxAttempts {
+				s.logf("req %s upstream transport error (attempt %d/%d): %v", rid, attempt, maxAttempts, err)
+				if !sleepCtx(ctx, time.Duration(attempt)*time.Second) {
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, err
+		}
+		if resp.StatusCode == 200 {
+			return resp, nil
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		retryAfter := resp.Header.Get("Retry-After")
+		resp.Body.Close()
+		if resp.StatusCode == 401 {
+			if attempt == 1 {
+				s.logf("req %s upstream 401, refreshing token", rid)
+				if rerr := s.auth.forceRefresh(ctx); rerr == nil {
+					continue
+				}
+			}
+			return errorResponse(resp, raw), nil
+		}
+		wait, queued := queueWait(raw)
+		if retryableStatus(resp.StatusCode) || queued {
+			if attempt >= maxAttempts {
+				return errorResponse(resp, raw), nil
+			}
+			if !queued {
+				wait = time.Duration(1<<uint(attempt-1)) * time.Second
+				if retryAfter != "" {
+					if secs, perr := time.ParseDuration(retryAfter+"s"); perr == nil {
+						wait = secs
+					}
+				}
+			}
+			if wait > 30*time.Second {
+				wait = 30 * time.Second
+			}
+			s.logf("req %s upstream status %d (attempt %d/%d), retry in %v: %s", rid, resp.StatusCode, attempt, maxAttempts, wait, truncate(string(raw), 300))
+			if !sleepCtx(ctx, wait) {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		return errorResponse(resp, raw), nil
+	}
+	return nil, fmt.Errorf("unreachable")
 }
 
 func (s *server) doUpstream(ctx context.Context, body []byte, mc *modelConfig) (*http.Response, error) {
@@ -631,6 +743,35 @@ func (s *server) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"input_tokens": est})
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *server) logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rec, r)
+		s.logf("http %s %s -> %d (%s)", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+	})
+}
+
 func (s *server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/messages", s.handleMessages)
@@ -643,4 +784,8 @@ func (s *server) routes() *http.ServeMux {
 		fmt.Fprintf(w, `{"ok":true,"authenticated":%v}`, s.auth.loggedIn())
 	})
 	return mux
+}
+
+func (s *server) handler() http.Handler {
+	return s.logMiddleware(s.routes())
 }

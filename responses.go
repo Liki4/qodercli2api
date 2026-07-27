@@ -487,23 +487,17 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeOAIError(w, 400, "invalid_request_error", "", err.Error())
 		return
 	}
-	resp, err := s.doUpstream(r.Context(), body, mc)
+	s.logf("req %s resp model=%s->%s stream=%v bytes=%d items=%d tools=%d", requestID[:8], req.Model, mc.Key, req.Stream, len(raw), len(req.Input), len(req.Tools))
+	resp, err := s.callUpstream(r.Context(), body, mc, requestID[:8])
 	if err != nil {
+		s.logf("req %s upstream error: %v", requestID[:8], err)
 		writeOAIError(w, 502, "api_error", "", "upstream request failed: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 401 {
-		io.Copy(io.Discard, resp.Body)
-		if rerr := s.auth.forceRefresh(r.Context()); rerr == nil {
-			if resp2, err2 := s.doUpstream(r.Context(), body, mc); err2 == nil {
-				defer resp2.Body.Close()
-				resp = resp2
-			}
-		}
-	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		s.logf("req %s upstream final status %d: %s", requestID[:8], resp.StatusCode, truncate(string(b), 500))
 		writeOAIError(w, resp.StatusCode, "api_error", "", fmt.Sprintf("upstream status %d: %s", resp.StatusCode, truncate(string(b), 300)))
 		return
 	}
