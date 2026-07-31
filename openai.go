@@ -12,11 +12,52 @@ import (
 
 // ---------- shared upstream body construction ----------
 
+// businessInfo builds the `business` field. Upstream requires it: some models
+// (e.g. ultimate) are routed through a node that rejects requests without it
+// with `[FAIL]node:oa_qwen-plus... Execution failed: null`.
+func businessInfo(msgs []upMessage) map[string]any {
+	name := lastUserText(msgs)
+	if len(name) > 10 {
+		name = name[:10]
+	}
+	return map[string]any{
+		"product":  "cli",
+		"version":  cliVersion,
+		"type":     "agent",
+		"id":       newUUID(),
+		"name":     name,
+		"begin_at": time.Now().UnixMilli(),
+		"stage":    "start",
+	}
+}
+
+func lastUserText(msgs []upMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		switch c := msgs[i].Content.(type) {
+		case string:
+			if c != "" {
+				return c
+			}
+		case []upContentPart:
+			for _, p := range c {
+				if p.Type == "text" && p.Text != "" {
+					return p.Text
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func remoteChatAskBody(system string, msgs []upMessage, tools []map[string]any, params map[string]any, mc *modelConfig, sessionID, requestID string) ([]byte, error) {
 	if tools == nil {
 		tools = []map[string]any{}
 	}
 	body := map[string]any{
+		"business":         businessInfo(msgs),
 		"request_id":       requestID,
 		"request_set_id":   requestID,
 		"chat_record_id":   requestID,

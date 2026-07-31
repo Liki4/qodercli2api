@@ -362,6 +362,7 @@ func buildUpstreamBody(req *anthropicRequest, mc *modelConfig, sessionID, reques
 		params["stop"] = req.StopSequences
 	}
 	body := map[string]any{
+		"business":         businessInfo(msgs),
 		"request_id":       requestID,
 		"request_set_id":   requestID,
 		"chat_record_id":   requestID,
