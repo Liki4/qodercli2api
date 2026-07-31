@@ -19,3 +19,5 @@ __pycache__/
 # codex test home (keep only config.toml as example)
 re/codex-home/*
 !re/codex-home/config.toml
+# unrelated binary from another project
+claude2api-mac
