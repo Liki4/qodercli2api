@@ -445,11 +445,24 @@ func (s *streamState) openBlock(kind string, startPayload map[string]any) {
 	if s.blockType == kind {
 		return
 	}
+	s.startBlock(kind, startPayload)
+}
+
+// startBlock always begins a new content block, even when one of the same kind
+// is already open. Parallel tool calls need this: upstream reuses index 0 for
+// every call and only signals a new call with a fresh id, so reusing the open
+// block would concatenate both calls' arguments into one invalid JSON object.
+func (s *streamState) startBlock(kind string, startPayload map[string]any) {
+	s.messageStart()
 	s.closeBlock()
 	s.blockType = kind
 	s.emit("content_block_start", map[string]any{
 		"type": "content_block_start", "index": s.blockIndex, "content_block": startPayload,
 	})
+}
+
+func (s *streamState) toolBlockPayload() map[string]any {
+	return map[string]any{"type": "tool_use", "id": s.toolID, "name": s.toolName, "input": map[string]any{}}
 }
 
 func (s *streamState) handleChunk(c *upChunk) {
@@ -477,22 +490,20 @@ func (s *streamState) handleChunk(c *upChunk) {
 		})
 	}
 	for _, tc := range d.ToolCalls {
-		if tc.ID != "" || tc.Function.Name != "" {
+		// A non-empty id marks the start of a new tool call; a name without an id
+		// only starts one when no tool block is open yet.
+		if tc.ID != "" || (tc.Function.Name != "" && s.blockType != "tool_use") {
 			if tc.ID != "" {
 				s.toolID = tc.ID
 			}
 			if tc.Function.Name != "" {
 				s.toolName = tc.Function.Name
 			}
-			s.openBlock("tool_use", map[string]any{
-				"type": "tool_use", "id": s.toolID, "name": s.toolName, "input": map[string]any{},
-			})
+			s.startBlock("tool_use", s.toolBlockPayload())
 		}
 		if tc.Function.Arguments != "" {
 			if s.blockType != "tool_use" {
-				s.openBlock("tool_use", map[string]any{
-					"type": "tool_use", "id": s.toolID, "name": s.toolName, "input": map[string]any{},
-				})
+				s.startBlock("tool_use", s.toolBlockPayload())
 			}
 			s.emit("content_block_delta", map[string]any{
 				"type": "content_block_delta", "index": s.blockIndex,

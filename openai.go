@@ -142,6 +142,30 @@ func upstreamChunks(ctx context.Context, body io.Reader) (<-chan *upChunk, <-cha
 	return out, errc
 }
 
+// toolIndexer renumbers upstream tool_call indexes. Upstream emits index 0 for
+// every parallel tool call and only signals a new call with a fresh id, so
+// clients that accumulate by index would merge distinct calls into one.
+type toolIndexer struct {
+	cur  int
+	seen bool
+}
+
+func (t *toolIndexer) remap(c *upChunk) {
+	for ci := range c.Choices {
+		tcs := c.Choices[ci].Delta.ToolCalls
+		for i := range tcs {
+			if tcs[i].ID != "" {
+				if t.seen {
+					t.cur++
+				} else {
+					t.seen = true
+				}
+			}
+			tcs[i].Index = t.cur
+		}
+	}
+}
+
 // ---------- OpenAI chat completions types ----------
 
 type oaiRequest struct {
@@ -330,7 +354,9 @@ func (s *server) streamOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc <
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
+	idx := &toolIndexer{}
 	for c := range chunks {
+		idx.remap(c)
 		writeChunk(c)
 	}
 	select {
@@ -358,6 +384,7 @@ func (s *server) collectOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc 
 		TotalTokens      int `json:"total_tokens"`
 	}
 	var firstErr string
+	idx := &toolIndexer{}
 	for c := range chunks {
 		if c.Usage != nil {
 			u := *c.Usage
@@ -366,6 +393,7 @@ func (s *server) collectOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc 
 		if len(c.Choices) == 0 {
 			continue
 		}
+		idx.remap(c)
 		ch := c.Choices[0]
 		d := ch.Delta
 		content.WriteString(d.Content)
