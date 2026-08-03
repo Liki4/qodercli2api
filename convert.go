@@ -171,16 +171,21 @@ func messagesToUpstream(msgs []anthropicMsg) ([]upMessage, error) {
 					normal = append(normal, b)
 				}
 			}
-			if len(normal) > 0 || len(toolResults) == 0 {
-				content, parts := userContentFromBlocks(normal)
-				out = append(out, upMessage{Role: "user", Content: content, Contents: parts})
-			}
+			// Tool results must come first: upstream requires the tool messages to
+			// directly follow the assistant message that requested them. Anthropic
+			// clients pack tool_result blocks into a user message that may also
+			// carry text, so emitting the text first would break that adjacency
+			// and upstream answers with `Error in upstream response`.
 			for _, tr := range toolResults {
 				out = append(out, upMessage{
 					Role:       "tool",
 					ToolCallID: tr.ToolUseID,
 					Content:    toolResultText(tr.Content),
 				})
+			}
+			if len(normal) > 0 || len(toolResults) == 0 {
+				content, parts := userContentFromBlocks(normal)
+				out = append(out, upMessage{Role: "user", Content: content, Contents: parts})
 			}
 			continue
 		}
