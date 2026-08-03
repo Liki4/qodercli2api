@@ -365,9 +365,16 @@ func (s *server) streamOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc <
 		flusher.Flush()
 	}
 	idx := &toolIndexer{}
+	var usage *upUsage
 	for c := range chunks {
 		idx.remap(c)
+		if c.Usage != nil {
+			usage = c.Usage
+		}
 		writeChunk(c)
+	}
+	if usage != nil {
+		s.logf("req %s usage prompt=%d completion=%d cache_read=%d%s", requestID[:8], usage.PromptTokens, usage.CompletionTokens, usage.cachedTokens(), usage.billingLog())
 	}
 	select {
 	case err := <-errc:
@@ -473,7 +480,11 @@ func (s *server) collectOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc 
 		if cached := usage.cachedTokens(); cached > 0 {
 			u["prompt_tokens_details"] = map[string]int{"cached_tokens": cached}
 		}
+		for k, v := range usage.billingFields() {
+			u[k] = v
+		}
 		resp["usage"] = u
+		s.logf("req %s usage prompt=%d completion=%d cache_read=%d%s", requestID[:8], usage.PromptTokens, usage.CompletionTokens, usage.cachedTokens(), usage.billingLog())
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

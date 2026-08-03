@@ -433,6 +433,50 @@ type upUsage struct {
 		CachedTokens    int `json:"cached_tokens"`
 		CacheableTokens int `json:"cacheable_tokens"`
 	} `json:"prompt_tokens_details,omitempty"`
+	Credits         *float64 `json:"credits,omitempty"`
+	OriginalCredits *float64 `json:"original_credits,omitempty"`
+	Billable        *bool    `json:"billable,omitempty"`
+}
+
+// billingFields reports the upstream credit accounting for a request. credits is
+// what the account was charged and original_credits the undiscounted amount, so
+// the two differ while an off-peak promotion is active.
+func (u *upUsage) billingFields() map[string]any {
+	if u == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if u.Credits != nil {
+		out["credits"] = *u.Credits
+	}
+	if u.OriginalCredits != nil {
+		out["original_credits"] = *u.OriginalCredits
+	}
+	if u.Billable != nil {
+		out["billable"] = *u.Billable
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// billingLog renders billingFields as a log suffix, empty when absent.
+func (u *upUsage) billingLog() string {
+	var b strings.Builder
+	if u == nil {
+		return ""
+	}
+	if u.Credits != nil {
+		fmt.Fprintf(&b, " credits=%g", *u.Credits)
+	}
+	if u.OriginalCredits != nil {
+		fmt.Fprintf(&b, " original_credits=%g", *u.OriginalCredits)
+	}
+	if u.Billable != nil {
+		fmt.Fprintf(&b, " billable=%v", *u.Billable)
+	}
+	return b.String()
 }
 
 // cachedTokens reports how many prompt tokens the upstream served from cache.
@@ -493,7 +537,7 @@ type anthropicResponse struct {
 	Content    []map[string]any `json:"content"`
 	Model      string           `json:"model"`
 	StopReason string           `json:"stop_reason"`
-	Usage      map[string]int   `json:"usage"`
+	Usage      map[string]any   `json:"usage"`
 }
 
 func mapStopReason(fr string) string {

@@ -226,6 +226,7 @@ type respStreamState struct {
 	cacheRead  int
 	cacheWrite int
 	stopReason string
+	bill       *upUsage
 }
 
 func (st *respStreamState) emit(event string, payload map[string]any) {
@@ -414,6 +415,8 @@ func (st *respStreamState) setUsage(u *upUsage) {
 	st.cacheWrite = u.cacheWriteTokens()
 	st.inTok = max(u.PromptTokens-st.cacheRead-st.cacheWrite, 0)
 	st.outTok = u.CompletionTokens
+	c := *u
+	st.bill = &c
 }
 
 func (st *respStreamState) complete() {
@@ -427,12 +430,16 @@ func (st *respStreamState) complete() {
 	resp := st.baseResponse(status)
 	resp["output"] = st.items
 	resp["incomplete_details"] = incomplete
-	resp["usage"] = map[string]any{
+	usage := map[string]any{
 		"input_tokens":         st.inTok,
 		"input_tokens_details": map[string]int{"cached_tokens": st.cacheRead},
 		"output_tokens":        st.outTok,
 		"total_tokens":         st.inTok + st.cacheWrite + st.cacheRead + st.outTok,
 	}
+	for k, v := range st.bill.billingFields() {
+		usage[k] = v
+	}
+	resp["usage"] = usage
 	st.emit("response.completed", map[string]any{"response": resp})
 }
 
@@ -555,6 +562,7 @@ func (s *server) streamResponses(w http.ResponseWriter, chunks <-chan *upChunk, 
 		return
 	}
 	st.complete()
+	s.logf("req %s usage input=%d cache_write=%d cache_read=%d output=%d%s", requestID[:8], st.inTok, st.cacheWrite, st.cacheRead, st.outTok, st.bill.billingLog())
 }
 
 func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk, errc <-chan error, req *respRequest, requestID string) {
@@ -564,12 +572,14 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 	cur := -1
 	stopReason := "stop"
 	inTok, outTok, cacheRead, cacheWrite := 0, 0, 0, 0
+	var bill *upUsage
 	for c := range chunks {
 		if c.Usage != nil {
 			cacheRead = c.Usage.cachedTokens()
 			cacheWrite = c.Usage.cacheWriteTokens()
 			inTok = max(c.Usage.PromptTokens-cacheRead-cacheWrite, 0)
 			outTok = c.Usage.CompletionTokens
+			bill = c.Usage
 		}
 		if len(c.Choices) == 0 {
 			continue
@@ -640,18 +650,23 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 		status = "incomplete"
 		incomplete = map[string]any{"reason": "max_output_tokens"}
 	}
+	usage := map[string]any{
+		"input_tokens":         inTok,
+		"input_tokens_details": map[string]int{"cached_tokens": cacheRead},
+		"output_tokens":        outTok,
+		"total_tokens":         inTok + cacheWrite + cacheRead + outTok,
+	}
+	for k, v := range bill.billingFields() {
+		usage[k] = v
+	}
 	out := map[string]any{
 		"id": "resp_" + newUUIDShort(), "object": "response", "created_at": nowUnix(),
 		"status": status, "model": req.Model, "output": items,
 		"error": nil, "incomplete_details": incomplete,
 		"metadata": map[string]any{}, "parallel_tool_calls": true,
-		"usage": map[string]any{
-			"input_tokens":         inTok,
-			"input_tokens_details": map[string]int{"cached_tokens": cacheRead},
-			"output_tokens":        outTok,
-			"total_tokens":         inTok + cacheWrite + cacheRead + outTok,
-		},
+		"usage": usage,
 	}
+	s.logf("req %s usage input=%d cache_write=%d cache_read=%d output=%d%s", requestID[:8], inTok, cacheWrite, cacheRead, outTok, bill.billingLog())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 }
