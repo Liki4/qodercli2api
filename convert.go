@@ -439,6 +439,17 @@ func (u *upUsage) cachedTokens() int {
 	return u.PromptTokensDetails.CachedTokens
 }
 
+// cacheWriteTokens reports how many prompt tokens were written to the cache by
+// this request. Upstream calls them "cacheable": on a cache miss the field
+// holds the whole cacheable prefix, on a hit it drops to 0 while cached_tokens
+// takes over. That matches Anthropic's cache_creation_input_tokens.
+func (u *upUsage) cacheWriteTokens() int {
+	if u == nil || u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CacheableTokens
+}
+
 type upChunk struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`

@@ -440,6 +440,7 @@ type streamState struct {
 	inputTokens  int
 	outputTokens int
 	cacheRead    int
+	cacheWrite   int
 	stopReason   string
 	err          error
 }
@@ -448,10 +449,8 @@ type streamState struct {
 // Anthropic-shaped usage reports them as cache reads.
 func (s *streamState) setUsage(u *upUsage) {
 	s.cacheRead = u.cachedTokens()
-	s.inputTokens = u.PromptTokens - s.cacheRead
-	if s.inputTokens < 0 {
-		s.inputTokens = 0
-	}
+	s.cacheWrite = u.cacheWriteTokens()
+	s.inputTokens = max(u.PromptTokens-s.cacheRead-s.cacheWrite, 0)
 	s.outputTokens = u.CompletionTokens
 }
 
@@ -460,7 +459,7 @@ func (s *streamState) usagePayload() map[string]int {
 		"input_tokens":                s.inputTokens,
 		"output_tokens":               s.outputTokens,
 		"cache_read_input_tokens":     s.cacheRead,
-		"cache_creation_input_tokens": 0,
+		"cache_creation_input_tokens": s.cacheWrite,
 	}
 }
 
@@ -665,7 +664,7 @@ func (s *server) streamAnthropic(w http.ResponseWriter, body io.Reader, areq *an
 		st.finish()
 	}
 	if st.cacheRead > 0 || st.inputTokens > 0 {
-		s.logf("req %s usage input=%d cache_read=%d output=%d", requestID[:8], st.inputTokens, st.cacheRead, st.outputTokens)
+		s.logf("req %s usage input=%d cache_write=%d cache_read=%d output=%d", requestID[:8], st.inputTokens, st.cacheWrite, st.cacheRead, st.outputTokens)
 	}
 }
 
@@ -689,7 +688,7 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 		}
 	}
 	stopReason := "end_turn"
-	inTok, outTok, cacheRead := 0, 0, 0
+	inTok, outTok, cacheRead, cacheWrite := 0, 0, 0, 0
 	var firstErr string
 
 	readSSE(context.Background(), body, func(f sseFrame) bool {
@@ -729,7 +728,8 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 		if len(chunk.Choices) == 0 {
 			if chunk.Usage != nil {
 				cacheRead = chunk.Usage.cachedTokens()
-				inTok = max(chunk.Usage.PromptTokens-cacheRead, 0)
+				cacheWrite = chunk.Usage.cacheWriteTokens()
+				inTok = max(chunk.Usage.PromptTokens-cacheRead-cacheWrite, 0)
 				outTok = chunk.Usage.CompletionTokens
 			}
 			return true
@@ -761,7 +761,8 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 			stopReason = mapStopReason(*ch.FinishReason)
 			if chunk.Usage != nil {
 				cacheRead = chunk.Usage.cachedTokens()
-				inTok = max(chunk.Usage.PromptTokens-cacheRead, 0)
+				cacheWrite = chunk.Usage.cacheWriteTokens()
+				inTok = max(chunk.Usage.PromptTokens-cacheRead-cacheWrite, 0)
 				outTok = chunk.Usage.CompletionTokens
 			}
 		}
@@ -805,10 +806,10 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 			"input_tokens":                inTok,
 			"output_tokens":               outTok,
 			"cache_read_input_tokens":     cacheRead,
-			"cache_creation_input_tokens": 0,
+			"cache_creation_input_tokens": cacheWrite,
 		},
 	}
-	s.logf("req %s usage input=%d cache_read=%d output=%d", requestID[:8], inTok, cacheRead, outTok)
+	s.logf("req %s usage input=%d cache_write=%d cache_read=%d output=%d", requestID[:8], inTok, cacheWrite, cacheRead, outTok)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

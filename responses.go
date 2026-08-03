@@ -224,6 +224,7 @@ type respStreamState struct {
 	inTok      int
 	outTok     int
 	cacheRead  int
+	cacheWrite int
 	stopReason string
 }
 
@@ -410,10 +411,8 @@ func (st *respStreamState) handleChunk(c *upChunk) {
 
 func (st *respStreamState) setUsage(u *upUsage) {
 	st.cacheRead = u.cachedTokens()
-	st.inTok = u.PromptTokens - st.cacheRead
-	if st.inTok < 0 {
-		st.inTok = 0
-	}
+	st.cacheWrite = u.cacheWriteTokens()
+	st.inTok = max(u.PromptTokens-st.cacheRead-st.cacheWrite, 0)
 	st.outTok = u.CompletionTokens
 }
 
@@ -432,7 +431,7 @@ func (st *respStreamState) complete() {
 		"input_tokens":         st.inTok,
 		"input_tokens_details": map[string]int{"cached_tokens": st.cacheRead},
 		"output_tokens":        st.outTok,
-		"total_tokens":         st.inTok + st.cacheRead + st.outTok,
+		"total_tokens":         st.inTok + st.cacheWrite + st.cacheRead + st.outTok,
 	}
 	st.emit("response.completed", map[string]any{"response": resp})
 }
@@ -564,11 +563,12 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 	var fcs []fc
 	cur := -1
 	stopReason := "stop"
-	inTok, outTok, cacheRead := 0, 0, 0
+	inTok, outTok, cacheRead, cacheWrite := 0, 0, 0, 0
 	for c := range chunks {
 		if c.Usage != nil {
 			cacheRead = c.Usage.cachedTokens()
-			inTok = max(c.Usage.PromptTokens-cacheRead, 0)
+			cacheWrite = c.Usage.cacheWriteTokens()
+			inTok = max(c.Usage.PromptTokens-cacheRead-cacheWrite, 0)
 			outTok = c.Usage.CompletionTokens
 		}
 		if len(c.Choices) == 0 {
@@ -649,7 +649,7 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 			"input_tokens":         inTok,
 			"input_tokens_details": map[string]int{"cached_tokens": cacheRead},
 			"output_tokens":        outTok,
-			"total_tokens":         inTok + cacheRead + outTok,
+			"total_tokens":         inTok + cacheWrite + cacheRead + outTok,
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
