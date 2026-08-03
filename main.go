@@ -195,6 +195,11 @@ func loadCatalog(w *wasmAuth, am *authManager, catalogPath string, logf func(str
 					mc.Source = "system"
 				}
 				mc.Enable = true
+				for _, tier := range mc.ContextConfig {
+					if tier.TokenCount > mc.MaxInputTokens {
+						mc.MaxInputTokens = tier.TokenCount
+					}
+				}
 				merged[mc.Key] = mc
 			}
 			catalog = catalog[:0]
@@ -219,11 +224,11 @@ func builtinCatalog() []*modelConfig {
 		{"performance", "Performance", false, 1000000},
 		{"efficient", "Efficient", false, 180000},
 		{"lite", "Lite", false, 180000},
-		{"cmodel", "Cantus", true, 180000},
-		{"qmodel_38max", "Qwen3.8-Max", true, 180000},
+		{"cmodel", "Cantus", true, 1000000},
+		{"qmodel_38max", "Qwen3.8-Max", true, 1000000},
 		{"qmodel_latest", "Qwen3.7-Max", false, 1000000},
 		{"qmodel", "Qwen3.7-Plus", false, 1000000},
-		{"kmodel_latest", "Kimi-K3", false, 180000},
+		{"kmodel_latest", "Kimi-K3", false, 1000000},
 		{"kmodel", "Kimi-K2.7-Code", false, 256000},
 		{"gm51model", "GLM-5.2", true, 1000000},
 		{"dmodel", "DeepSeek-V4-Pro", true, 1000000},

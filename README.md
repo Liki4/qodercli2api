@@ -191,11 +191,11 @@ curl -N -X POST http://127.0.0.1:8377/v1/responses \
 | `performance` | Performance | - | ✓ | **1M** |
 | `efficient` | Efficient | - | ✓ | 180k |
 | `lite` | Lite | - | ✗ | 180k |
-| `cmodel` | Cantus | ✓ | ✓ | 180k |
-| `qmodel_38max` | Qwen3.8-Max | ✓ | ✓ | 180k |
+| `cmodel` | Cantus | ✓ | ✓ | **1M** |
+| `qmodel_38max` | Qwen3.8-Max | ✓ | ✓ | **1M** |
 | `qmodel_latest` | Qwen3.7-Max | - | ✓ | **1M** |
 | `qmodel` | Qwen3.7-Plus | - | ✓ | **1M** |
-| `kmodel_latest` | Kimi-K3 | - | ✓ | 180k |
+| `kmodel_latest` | Kimi-K3 | - | ✓ | **1M** |
 | `kmodel` | Kimi-K2.7-Code | - | ✓ | 256k |
 | `gm51model` | GLM-5.2 | ✓ | ✓ | **1M** |
 | `dmodel` | DeepSeek-V4-Pro | ✓ | ✓ | **1M** |

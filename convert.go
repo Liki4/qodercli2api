@@ -114,6 +114,10 @@ type modelConfig struct {
 	PriceFactor    float64 `json:"price_factor,omitempty"`
 	MaxInputTokens int     `json:"max_input_tokens,omitempty"`
 	URL            string  `json:"url,omitempty"`
+
+	ContextConfig map[string]struct {
+		TokenCount int `json:"token_count"`
+	} `json:"context_config,omitempty"`
 }
 
 // ---------- conversion ----------
