@@ -220,7 +220,7 @@ func builtinCatalog() []*modelConfig {
 		{"efficient", "Efficient", false, 180000},
 		{"lite", "Lite", false, 180000},
 		{"cmodel", "Cantus", true, 180000},
-		{"qmodel_preview", "Qwen3.8-Max-Preview", true, 180000},
+		{"qmodel_38max", "Qwen3.8-Max", true, 180000},
 		{"qmodel_latest", "Qwen3.7-Max", false, 1000000},
 		{"qmodel", "Qwen3.7-Plus", false, 1000000},
 		{"kmodel_latest", "Kimi-K3", false, 180000},

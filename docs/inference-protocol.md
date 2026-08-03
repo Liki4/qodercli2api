@@ -146,7 +146,7 @@ delta 字段：
 | efficient | Efficient | - | ✓ | 180k |
 | lite | Lite | - | ✗ | 180k |
 | cmodel | Cantus | ✓ | ✓ | 180k |
-| qmodel_preview | Qwen3.8-Max-Preview | ✓ | ✓ | 180k |
+| qmodel_38max | Qwen3.8-Max | ✓ | ✓ | 180k |
 | qmodel_latest | Qwen3.7-Max | - | ✓ | 1M |
 | qmodel | Qwen3.7-Plus | - | ✓ | 1M |
 | kmodel_latest | Kimi-K3 | - | ✓ | 180k |
