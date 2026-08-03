@@ -10,17 +10,17 @@ import (
 // ---------- Anthropic request types ----------
 
 type anthropicRequest struct {
-	Model         string           `json:"model"`
-	Messages      []anthropicMsg   `json:"messages"`
-	System        json.RawMessage  `json:"system,omitempty"`
-	MaxTokens     int              `json:"max_tokens"`
-	Stream        bool             `json:"stream,omitempty"`
-	Tools         []anthropicTool  `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage  `json:"tool_choice,omitempty"`
-	StopSequences []string         `json:"stop_sequences,omitempty"`
-	Temperature   *float64         `json:"temperature,omitempty"`
-	TopP          *float64         `json:"top_p,omitempty"`
-	Thinking      *anthropicThink  `json:"thinking,omitempty"`
+	Model         string          `json:"model"`
+	Messages      []anthropicMsg  `json:"messages"`
+	System        json.RawMessage `json:"system,omitempty"`
+	MaxTokens     int             `json:"max_tokens"`
+	Stream        bool            `json:"stream,omitempty"`
+	Tools         []anthropicTool `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
+	StopSequences []string        `json:"stop_sequences,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	Thinking      *anthropicThink `json:"thinking,omitempty"`
 }
 
 type anthropicThink struct {
@@ -47,7 +47,8 @@ type anthropicBlock struct {
 		Data      string `json:"data"`
 		URL       string `json:"url,omitempty"`
 	} `json:"source,omitempty"`
-	Thinking string `json:"thinking,omitempty"`
+	Thinking     string        `json:"thinking,omitempty"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicTool struct {
@@ -59,11 +60,29 @@ type anthropicTool struct {
 // ---------- upstream (OpenAI-ish) types ----------
 
 type upMessage struct {
-	Role       string      `json:"role"`
-	Content    any         `json:"content,omitempty"`
+	Role       string       `json:"role"`
+	Content    any          `json:"content,omitempty"`
+	Contents   []upPart     `json:"contents,omitempty"`
 	ToolCalls  []upToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
-	Name       string      `json:"name,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
+	Name       string       `json:"name,omitempty"`
+}
+
+type cacheControl struct {
+	Type string `json:"type"`
+}
+
+// upPart mirrors the structured `contents` entries the official client sends
+// alongside `content`. Prompt-cache markers live here.
+type upPart struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	ImageURL     *upImageURL   `json:"image_url,omitempty"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+type upImageURL struct {
+	URL string `json:"url"`
 }
 
 type upToolCall struct {
@@ -153,7 +172,8 @@ func messagesToUpstream(msgs []anthropicMsg) ([]upMessage, error) {
 				}
 			}
 			if len(normal) > 0 || len(toolResults) == 0 {
-				out = append(out, upMessage{Role: "user", Content: userContentFromBlocks(normal)})
+				content, parts := userContentFromBlocks(normal)
+				out = append(out, upMessage{Role: "user", Content: content, Contents: parts})
 			}
 			for _, tr := range toolResults {
 				out = append(out, upMessage{
@@ -166,11 +186,13 @@ func messagesToUpstream(msgs []anthropicMsg) ([]upMessage, error) {
 		}
 		// assistant
 		var textParts []string
+		var parts []upPart
 		var calls []upToolCall
 		for _, b := range blocks {
 			switch b.Type {
 			case "text":
 				textParts = append(textParts, b.Text)
+				parts = append(parts, upPart{Type: "text", Text: b.Text, CacheControl: b.CacheControl})
 			case "tool_use":
 				var tc upToolCall
 				tc.ID = b.ID
@@ -184,7 +206,7 @@ func messagesToUpstream(msgs []anthropicMsg) ([]upMessage, error) {
 				calls = append(calls, tc)
 			}
 		}
-		um := upMessage{Role: "assistant"}
+		um := upMessage{Role: "assistant", Contents: parts}
 		joined := strings.Join(textParts, "")
 		if joined != "" {
 			um.Content = joined
@@ -199,45 +221,65 @@ func messagesToUpstream(msgs []anthropicMsg) ([]upMessage, error) {
 	return out, nil
 }
 
-func userContentFromBlocks(blocks []anthropicBlock) any {
+// userContentFromBlocks returns the flat `content` value plus the structured
+// `contents` parts. The official client sends both; cache markers ride on the
+// structured parts.
+func userContentFromBlocks(blocks []anthropicBlock) (any, []upPart) {
+	var parts []upPart
+	var texts []string
 	hasImage := false
-	for _, b := range blocks {
-		if b.Type == "image" {
-			hasImage = true
-		}
-	}
-	if !hasImage {
-		var parts []string
-		for _, b := range blocks {
-			if b.Type == "text" {
-				parts = append(parts, b.Text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	var parts []upContentPart
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			parts = append(parts, upContentPart{Type: "text", Text: b.Text})
+			parts = append(parts, upPart{Type: "text", Text: b.Text, CacheControl: b.CacheControl})
+			texts = append(texts, b.Text)
 		case "image":
 			if b.Source == nil {
 				continue
 			}
-			var url string
+			url := b.Source.URL
 			if b.Source.Type == "base64" {
 				url = "data:" + b.Source.MediaType + ";base64," + b.Source.Data
-			} else {
-				url = b.Source.URL
 			}
-			p := upContentPart{Type: "image_url"}
-			p.ImageURL = &struct {
-				URL string `json:"url"`
-			}{URL: url}
-			parts = append(parts, p)
+			parts = append(parts, upPart{Type: "image_url", ImageURL: &upImageURL{URL: url}, CacheControl: b.CacheControl})
+			hasImage = true
 		}
 	}
-	return parts
+	if hasImage {
+		return parts, parts
+	}
+	return strings.Join(texts, "\n"), parts
+}
+
+// cacheableParts are the part types a prompt-cache marker may attach to,
+// mirroring the official client's exclusion set.
+func cacheablePart(t string) bool {
+	return t == "text" || t == "image_url"
+}
+
+// ensureCacheMarker guarantees exactly one ephemeral marker at the end of the
+// prompt when the client did not supply one (e.g. OpenAI/Codex clients), so the
+// whole prefix becomes cacheable. Mirrors the official placement rule: last
+// message, last cacheable part.
+func ensureCacheMarker(msgs []upMessage) {
+	for _, m := range msgs {
+		for _, p := range m.Contents {
+			if p.CacheControl != nil {
+				return
+			}
+		}
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "tool" {
+			continue
+		}
+		for j := len(msgs[i].Contents) - 1; j >= 0; j-- {
+			if cacheablePart(msgs[i].Contents[j].Type) {
+				msgs[i].Contents[j].CacheControl = &cacheControl{Type: "ephemeral"}
+				return
+			}
+		}
+	}
 }
 
 func toolResultText(raw json.RawMessage) string {
@@ -335,6 +377,7 @@ func buildUpstreamBody(req *anthropicRequest, mc *modelConfig, sessionID, reques
 	if err != nil {
 		return nil, err
 	}
+	ensureCacheMarker(msgs)
 	params := map[string]any{"max_tokens": req.MaxTokens}
 	if mc.MaxInputTokens > 0 {
 		params["context_length"] = mc.MaxInputTokens
@@ -361,31 +404,7 @@ func buildUpstreamBody(req *anthropicRequest, mc *modelConfig, sessionID, reques
 	if len(req.StopSequences) > 0 {
 		params["stop"] = req.StopSequences
 	}
-	body := map[string]any{
-		"business":         businessInfo(msgs),
-		"request_id":       requestID,
-		"request_set_id":   requestID,
-		"chat_record_id":   requestID,
-		"session_id":       sessionID,
-		"stream":           true,
-		"chat_task":        "FREE_INPUT",
-		"chat_context":     map[string]any{},
-		"is_reply":         true,
-		"is_retry":         false,
-		"source":           1,
-		"version":          "3",
-		"agent_id":         "agent_common",
-		"task_id":          "common",
-		"session_type":     "qodercli",
-		"aliyun_user_type": "",
-		"model_config":     mc,
-		"custom_model":     nil,
-		"system":           systemToString(req.System),
-		"messages":         msgs,
-		"tools":            toolsToUpstream(req.Tools),
-		"parameters":       params,
-	}
-	return json.Marshal(body)
+	return remoteChatAskBody(systemToString(req.System), msgs, toolsToUpstream(req.Tools), params, mc, sessionID, requestID)
 }
 
 // ---------- upstream SSE chunk types ----------
@@ -395,6 +414,24 @@ type sseEnvelope struct {
 	Body            string              `json:"body"`
 	StatusCodeValue int                 `json:"statusCodeValue"`
 	StatusCode      string              `json:"statusCode"`
+}
+
+type upUsage struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens    int `json:"cached_tokens"`
+		CacheableTokens int `json:"cacheable_tokens"`
+	} `json:"prompt_tokens_details,omitempty"`
+}
+
+// cachedTokens reports how many prompt tokens the upstream served from cache.
+func (u *upUsage) cachedTokens() int {
+	if u == nil || u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
 }
 
 type upChunk struct {
@@ -420,11 +457,7 @@ type upChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage,omitempty"`
+	Usage *upUsage `json:"usage,omitempty"`
 	Error *struct {
 		Code    string `json:"code,omitempty"`
 		Message string `json:"message,omitempty"`

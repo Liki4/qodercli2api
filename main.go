@@ -36,6 +36,7 @@ func main() {
 		defaultMdl  = flag.String("default-model", envOr("QODER2API_DEFAULT_MODEL", "auto"), "fallback qoder model key")
 		oneMMdl     = flag.String("model-1m", envOr("QODER2API_MODEL_1M", "ultimate"), "qoder model key used when client requests 1M context via [1m] suffix")
 		catalogPath = flag.String("catalog", envOr("QODER2API_CATALOG", ""), "path to decrypted catalog-v6 json (optional)")
+		dumpDir     = flag.String("dump-dir", envOr("QODER2API_DUMP_DIR", ""), "when set, dump plaintext bodies of failing upstream requests here for debugging")
 		login       = flag.Bool("login", false, "run device flow login then exit")
 		loginPAT    = flag.String("login-pat", "", "login with a personal access token then exit")
 		verbose     = flag.Bool("v", envOr("QODER2API_LOG", "") == "debug", "verbose logging")
@@ -118,7 +119,10 @@ func main() {
 
 	s := &server{
 		auth: am, wasm: w, sk: *sk, models: resolver,
-		httpc: &http.Client{Timeout: 0}, logf: always,
+		httpc: &http.Client{Timeout: 0}, logf: always, dumpDir: *dumpDir,
+	}
+	if *dumpDir != "" {
+		always("failing-request dumps enabled: %s", *dumpDir)
 	}
 	always("model keys available: %s", strings.Join(resolver.keys(), ", "))
 	always("listening on %s (sk=%s)", *addr, skPrint)

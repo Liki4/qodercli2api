@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
-	"time"
 	"sync"
+	"time"
 )
 
 type server struct {
@@ -20,8 +22,58 @@ type server struct {
 	models   *modelResolver
 	httpc    *http.Client
 	logf     func(string, ...any)
+	dumpDir  string
 	sessMu   sync.Mutex
 	sessions map[string]string
+	dumpMu   sync.Mutex
+	pending  map[string][]byte
+}
+
+// rememberBody keeps the plaintext upstream body so a failing request can be
+// dumped for offline replay/bisection.
+func (s *server) rememberBody(requestID string, body []byte) {
+	if s.dumpDir == "" {
+		return
+	}
+	s.dumpMu.Lock()
+	defer s.dumpMu.Unlock()
+	if s.pending == nil {
+		s.pending = map[string][]byte{}
+	}
+	s.pending[requestID] = body
+}
+
+func (s *server) forgetBody(requestID string) {
+	if s.dumpDir == "" {
+		return
+	}
+	s.dumpMu.Lock()
+	defer s.dumpMu.Unlock()
+	delete(s.pending, requestID)
+}
+
+// dumpFailure writes the failing request body plus the upstream error message.
+func (s *server) dumpFailure(requestID, errMsg string) {
+	if s.dumpDir == "" {
+		return
+	}
+	s.dumpMu.Lock()
+	body := s.pending[requestID]
+	s.dumpMu.Unlock()
+	if body == nil {
+		return
+	}
+	if err := os.MkdirAll(s.dumpDir, 0o700); err != nil {
+		s.logf("dump mkdir: %v", err)
+		return
+	}
+	base := filepath.Join(s.dumpDir, requestID[:8])
+	if err := os.WriteFile(base+".body.json", body, 0o600); err != nil {
+		s.logf("dump write: %v", err)
+		return
+	}
+	os.WriteFile(base+".error.txt", []byte(errMsg), 0o600)
+	s.logf("req %s failing request dumped to %s.body.json", requestID[:8], base)
 }
 
 type modelResolver struct {
@@ -117,7 +169,7 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, msg string)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]any{
-		"type": "error",
+		"type":  "error",
 		"error": map[string]string{"type": errType, "message": msg},
 	})
 }
@@ -157,6 +209,8 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		effort = fmt.Sprintf(" thinking=%s/%d", req2.Type, req2.BudgetTokens)
 	}
 	s.logf("req %s model=%s->%s stream=%v bytes=%d msgs=%d tools=%d%s", requestID[:8], areq.Model, mc.Key, areq.Stream, len(raw), len(areq.Messages), len(areq.Tools), effort)
+	s.rememberBody(requestID, body)
+	defer s.forgetBody(requestID)
 
 	resp, err := s.callUpstream(r.Context(), body, mc, requestID[:8])
 	if err != nil {
@@ -276,7 +330,7 @@ func (s *server) callUpstream(ctx context.Context, body []byte, mc *modelConfig,
 			if !queued {
 				wait = time.Duration(1<<uint(attempt-1)) * time.Second
 				if retryAfter != "" {
-					if secs, perr := time.ParseDuration(retryAfter+"s"); perr == nil {
+					if secs, perr := time.ParseDuration(retryAfter + "s"); perr == nil {
 						wait = secs
 					}
 				}
@@ -373,20 +427,41 @@ func readSSE(ctx context.Context, rd io.Reader, fn func(sseFrame) bool) error {
 // ---------- stream conversion ----------
 
 type streamState struct {
-	w           http.ResponseWriter
-	flusher     http.Flusher
-	msgID       string
-	model       string
-	blockType   string // "", "thinking", "text", "tool_use"
-	blockIndex  int
-	toolID      string
-	toolName    string
-	started     bool
-	stopped     bool
-	inputTokens int
+	w            http.ResponseWriter
+	flusher      http.Flusher
+	msgID        string
+	model        string
+	blockType    string // "", "thinking", "text", "tool_use"
+	blockIndex   int
+	toolID       string
+	toolName     string
+	started      bool
+	stopped      bool
+	inputTokens  int
 	outputTokens int
-	stopReason  string
-	err         error
+	cacheRead    int
+	stopReason   string
+	err          error
+}
+
+// setUsage records upstream usage, splitting cached prompt tokens out so the
+// Anthropic-shaped usage reports them as cache reads.
+func (s *streamState) setUsage(u *upUsage) {
+	s.cacheRead = u.cachedTokens()
+	s.inputTokens = u.PromptTokens - s.cacheRead
+	if s.inputTokens < 0 {
+		s.inputTokens = 0
+	}
+	s.outputTokens = u.CompletionTokens
+}
+
+func (s *streamState) usagePayload() map[string]int {
+	return map[string]int{
+		"input_tokens":                s.inputTokens,
+		"output_tokens":               s.outputTokens,
+		"cache_read_input_tokens":     s.cacheRead,
+		"cache_creation_input_tokens": 0,
+	}
 }
 
 func (s *streamState) finish() {
@@ -400,7 +475,7 @@ func (s *streamState) finish() {
 	s.emit("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": s.stopReason, "stop_sequence": nil},
-		"usage": map[string]int{"input_tokens": s.inputTokens, "output_tokens": s.outputTokens},
+		"usage": s.usagePayload(),
 	})
 	s.emit("message_stop", map[string]any{"type": "message_stop"})
 	s.stopped = true
@@ -468,8 +543,7 @@ func (s *streamState) toolBlockPayload() map[string]any {
 func (s *streamState) handleChunk(c *upChunk) {
 	if len(c.Choices) == 0 {
 		if c.Usage != nil {
-			s.inputTokens = c.Usage.PromptTokens
-			s.outputTokens = c.Usage.CompletionTokens
+			s.setUsage(c.Usage)
 		}
 		return
 	}
@@ -514,8 +588,7 @@ func (s *streamState) handleChunk(c *upChunk) {
 	if ch.FinishReason != nil && *ch.FinishReason != "" && *ch.FinishReason != "null" {
 		s.stopReason = mapStopReason(*ch.FinishReason)
 		if c.Usage != nil {
-			s.inputTokens = c.Usage.PromptTokens
-			s.outputTokens = c.Usage.CompletionTokens
+			s.setUsage(c.Usage)
 		}
 		s.closeBlock()
 	}
@@ -557,7 +630,7 @@ func (s *server) streamAnthropic(w http.ResponseWriter, body io.Reader, areq *an
 				msg = fmt.Sprintf("upstream error status %d", env.StatusCodeValue)
 			}
 			st.emit("error", map[string]any{
-				"type": "error",
+				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": msg},
 			})
 			protoErr = fmt.Errorf("%s", msg)
@@ -572,7 +645,7 @@ func (s *server) streamAnthropic(w http.ResponseWriter, body io.Reader, areq *an
 		}
 		if chunk.Error != nil && chunk.Error.Message != "" {
 			st.emit("error", map[string]any{
-				"type": "error",
+				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": chunk.Error.Message},
 			})
 			protoErr = fmt.Errorf("%s", chunk.Error.Message)
@@ -581,11 +654,18 @@ func (s *server) streamAnthropic(w http.ResponseWriter, body io.Reader, areq *an
 		st.handleChunk(&chunk)
 		return !st.stopped
 	})
+	if protoErr != nil {
+		s.logf("req %s in-stream upstream error: %s", requestID[:8], truncate(protoErr.Error(), 500))
+		s.dumpFailure(requestID, protoErr.Error())
+	}
 	if err != nil && protoErr == nil && !st.stopped {
-		s.logf("stream read error: %v", err)
+		s.logf("req %s stream read error: %v", requestID[:8], err)
 	}
 	if !st.stopped && protoErr == nil && st.started {
 		st.finish()
+	}
+	if st.cacheRead > 0 || st.inputTokens > 0 {
+		s.logf("req %s usage input=%d cache_read=%d output=%d", requestID[:8], st.inputTokens, st.cacheRead, st.outputTokens)
 	}
 }
 
@@ -609,7 +689,7 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 		}
 	}
 	stopReason := "end_turn"
-	inTok, outTok := 0, 0
+	inTok, outTok, cacheRead := 0, 0, 0
 	var firstErr string
 
 	readSSE(context.Background(), body, func(f sseFrame) bool {
@@ -648,7 +728,9 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 		}
 		if len(chunk.Choices) == 0 {
 			if chunk.Usage != nil {
-				inTok, outTok = chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens
+				cacheRead = chunk.Usage.cachedTokens()
+				inTok = max(chunk.Usage.PromptTokens-cacheRead, 0)
+				outTok = chunk.Usage.CompletionTokens
 			}
 			return true
 		}
@@ -678,7 +760,9 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 		if ch.FinishReason != nil && *ch.FinishReason != "" && *ch.FinishReason != "null" {
 			stopReason = mapStopReason(*ch.FinishReason)
 			if chunk.Usage != nil {
-				inTok, outTok = chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens
+				cacheRead = chunk.Usage.cachedTokens()
+				inTok = max(chunk.Usage.PromptTokens-cacheRead, 0)
+				outTok = chunk.Usage.CompletionTokens
 			}
 		}
 		return true
@@ -686,6 +770,8 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 	flushTool()
 
 	if firstErr != "" {
+		s.logf("req %s in-stream upstream error: %s", requestID[:8], truncate(firstErr, 500))
+		s.dumpFailure(requestID, firstErr)
 		writeAnthropicError(w, 502, "api_error", firstErr)
 		return
 	}
@@ -709,14 +795,20 @@ func (s *server) collectAnthropic(w http.ResponseWriter, body io.Reader, areq *a
 		content = []map[string]any{}
 	}
 	resp := anthropicResponse{
-		ID:      "msg_" + strings.ReplaceAll(requestID, "-", ""),
-		Type:    "message",
-		Role:    "assistant",
-		Content: content,
-		Model:   areq.Model,
+		ID:         "msg_" + strings.ReplaceAll(requestID, "-", ""),
+		Type:       "message",
+		Role:       "assistant",
+		Content:    content,
+		Model:      areq.Model,
 		StopReason: stopReason,
-		Usage:   map[string]int{"input_tokens": inTok, "output_tokens": outTok},
+		Usage: map[string]int{
+			"input_tokens":                inTok,
+			"output_tokens":               outTok,
+			"cache_read_input_tokens":     cacheRead,
+			"cache_creation_input_tokens": 0,
+		},
 	}
+	s.logf("req %s usage input=%d cache_read=%d output=%d", requestID[:8], inTok, cacheRead, outTok)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

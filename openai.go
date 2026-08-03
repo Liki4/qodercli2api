@@ -56,6 +56,12 @@ func remoteChatAskBody(system string, msgs []upMessage, tools []map[string]any, 
 	if tools == nil {
 		tools = []map[string]any{}
 	}
+	// Upstream reads the system prompt from messages[0], not the top-level
+	// `system` field; the official client sends both. Sending only the top-level
+	// field silently drops the system prompt.
+	if system != "" {
+		msgs = append([]upMessage{{Role: "system", Content: system}}, msgs...)
+	}
 	body := map[string]any{
 		"business":         businessInfo(msgs),
 		"request_id":       requestID,
@@ -179,18 +185,18 @@ type oaiRequest struct {
 	StreamOptions       *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"top_p,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
 	Stop            json.RawMessage `json:"stop,omitempty"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
 type oaiMessage struct {
-	Role       string      `json:"role"`
-	Content    any         `json:"content"`
-	Name       string      `json:"name,omitempty"`
+	Role       string       `json:"role"`
+	Content    any          `json:"content"`
+	Name       string       `json:"name,omitempty"`
 	ToolCalls  []upToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
 }
 
 func normalizeEffort(e string) string {
@@ -230,6 +236,9 @@ func oaiToUpstream(msgs []oaiMessage) (string, []upMessage) {
 			continue
 		}
 		um := upMessage{Role: m.Role, Name: m.Name, ToolCallID: m.ToolCallID}
+		if txt, ok := m.Content.(string); ok && txt != "" && m.Role != "tool" {
+			um.Contents = []upPart{{Type: "text", Text: txt}}
+		}
 		if len(m.ToolCalls) > 0 {
 			um.ToolCalls = m.ToolCalls
 			if m.Content == nil {
@@ -242,6 +251,7 @@ func oaiToUpstream(msgs []oaiMessage) (string, []upMessage) {
 		}
 		out = append(out, um)
 	}
+	ensureCacheMarker(out)
 	return strings.Join(sysParts, "\n\n"), out
 }
 
@@ -378,11 +388,7 @@ func (s *server) collectOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc 
 	toolMap := map[int]*upToolCall{}
 	var toolOrder []int
 	finishReason := "stop"
-	var usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	}
+	var usage *upUsage
 	var firstErr string
 	idx := &toolIndexer{}
 	for c := range chunks {
@@ -459,11 +465,15 @@ func (s *server) collectOAI(w http.ResponseWriter, chunks <-chan *upChunk, errc 
 		}},
 	}
 	if usage != nil {
-		resp["usage"] = map[string]int{
+		u := map[string]any{
 			"prompt_tokens":     usage.PromptTokens,
 			"completion_tokens": usage.CompletionTokens,
 			"total_tokens":      usage.TotalTokens,
 		}
+		if cached := usage.cachedTokens(); cached > 0 {
+			u["prompt_tokens_details"] = map[string]int{"cached_tokens": cached}
+		}
+		resp["usage"] = u
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

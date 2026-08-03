@@ -11,13 +11,13 @@ import (
 // ---------- Responses API types ----------
 
 type respRequest struct {
-	Model           string           `json:"model"`
-	Instructions    string           `json:"instructions,omitempty"`
-	Input           json.RawMessage  `json:"input,omitempty"`
-	Tools           []respTool       `json:"tools,omitempty"`
-	ToolChoice      json.RawMessage  `json:"tool_choice,omitempty"`
-	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
-	Stream          bool             `json:"stream,omitempty"`
+	Model           string          `json:"model"`
+	Instructions    string          `json:"instructions,omitempty"`
+	Input           json.RawMessage `json:"input,omitempty"`
+	Tools           []respTool      `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
+	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
 	Reasoning       *struct {
 		Effort string `json:"effort,omitempty"`
 	} `json:"reasoning,omitempty"`
@@ -62,7 +62,9 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 	}
 	var asString string
 	if err := json.Unmarshal(input, &asString); err == nil {
-		msgs = append(msgs, upMessage{Role: "user", Content: asString})
+		msgs = append(msgs, upMessage{Role: "user", Content: asString,
+			Contents: []upPart{{Type: "text", Text: asString}}})
+		ensureCacheMarker(msgs)
 		return strings.Join(sysParts, "\n\n"), msgs, nil
 	}
 	var items []respInputItem
@@ -90,6 +92,9 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 			} else {
 				um.Content = respPartsToOAI(it.Content)
 			}
+			if txt := respPartsText(it.Content); txt != "" {
+				um.Contents = []upPart{{Type: "text", Text: txt}}
+			}
 			msgs = append(msgs, um)
 		case "function_call":
 			if pendingAssistant == nil {
@@ -111,6 +116,7 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 		}
 	}
 	flushAssistant()
+	ensureCacheMarker(msgs)
 	return strings.Join(sysParts, "\n\n"), msgs, nil
 }
 
@@ -217,6 +223,7 @@ type respStreamState struct {
 	items      []map[string]any
 	inTok      int
 	outTok     int
+	cacheRead  int
 	stopReason string
 }
 
@@ -233,15 +240,15 @@ func (st *respStreamState) baseResponse(status string) map[string]any {
 	return map[string]any{
 		"id": st.respID, "object": "response", "created_at": nowUnix(),
 		"status": status, "model": st.model,
-		"output":             []any{},
-		"error":              nil,
-		"incomplete_details": nil,
-		"instructions":       nil,
-		"metadata":           map[string]any{},
+		"output":              []any{},
+		"error":               nil,
+		"incomplete_details":  nil,
+		"instructions":        nil,
+		"metadata":            map[string]any{},
 		"parallel_tool_calls": true,
-		"tools":              []any{},
-		"tool_choice":        "auto",
-		"store":              false,
+		"tools":               []any{},
+		"tool_choice":         "auto",
+		"store":               false,
 	}
 }
 
@@ -349,8 +356,7 @@ func (st *respStreamState) openFunctionCall(callID, name string) {
 func (st *respStreamState) handleChunk(c *upChunk) {
 	if len(c.Choices) == 0 {
 		if c.Usage != nil {
-			st.inTok = c.Usage.PromptTokens
-			st.outTok = c.Usage.CompletionTokens
+			st.setUsage(c.Usage)
 		}
 		return
 	}
@@ -397,10 +403,18 @@ func (st *respStreamState) handleChunk(c *upChunk) {
 	if ch.FinishReason != nil && *ch.FinishReason != "" && *ch.FinishReason != "null" {
 		st.stopReason = *ch.FinishReason
 		if c.Usage != nil {
-			st.inTok = c.Usage.PromptTokens
-			st.outTok = c.Usage.CompletionTokens
+			st.setUsage(c.Usage)
 		}
 	}
+}
+
+func (st *respStreamState) setUsage(u *upUsage) {
+	st.cacheRead = u.cachedTokens()
+	st.inTok = u.PromptTokens - st.cacheRead
+	if st.inTok < 0 {
+		st.inTok = 0
+	}
+	st.outTok = u.CompletionTokens
 }
 
 func (st *respStreamState) complete() {
@@ -415,8 +429,10 @@ func (st *respStreamState) complete() {
 	resp["output"] = st.items
 	resp["incomplete_details"] = incomplete
 	resp["usage"] = map[string]any{
-		"input_tokens": st.inTok, "output_tokens": st.outTok,
-		"total_tokens": st.inTok + st.outTok,
+		"input_tokens":         st.inTok,
+		"input_tokens_details": map[string]int{"cached_tokens": st.cacheRead},
+		"output_tokens":        st.outTok,
+		"total_tokens":         st.inTok + st.cacheRead + st.outTok,
 	}
 	st.emit("response.completed", map[string]any{"response": resp})
 }
@@ -487,7 +503,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeOAIError(w, 400, "invalid_request_error", "", err.Error())
 		return
 	}
-	s.logf("req %s resp model=%s->%s stream=%v bytes=%d items=%d tools=%d", requestID[:8], req.Model, mc.Key, req.Stream, len(raw), len(req.Input), len(req.Tools))
+	s.logf("req %s resp model=%s->%s stream=%v bytes=%d msgs=%d tools=%d", requestID[:8], req.Model, mc.Key, req.Stream, len(raw), len(upMsgs), len(req.Tools))
 	resp, err := s.callUpstream(r.Context(), body, mc, requestID[:8])
 	if err != nil {
 		s.logf("req %s upstream error: %v", requestID[:8], err)
@@ -548,10 +564,12 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 	var fcs []fc
 	cur := -1
 	stopReason := "stop"
-	inTok, outTok := 0, 0
+	inTok, outTok, cacheRead := 0, 0, 0
 	for c := range chunks {
 		if c.Usage != nil {
-			inTok, outTok = c.Usage.PromptTokens, c.Usage.CompletionTokens
+			cacheRead = c.Usage.cachedTokens()
+			inTok = max(c.Usage.PromptTokens-cacheRead, 0)
+			outTok = c.Usage.CompletionTokens
 		}
 		if len(c.Choices) == 0 {
 			continue
@@ -628,7 +646,10 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 		"error": nil, "incomplete_details": incomplete,
 		"metadata": map[string]any{}, "parallel_tool_calls": true,
 		"usage": map[string]any{
-			"input_tokens": inTok, "output_tokens": outTok, "total_tokens": inTok + outTok,
+			"input_tokens":         inTok,
+			"input_tokens_details": map[string]int{"cached_tokens": cacheRead},
+			"output_tokens":        outTok,
+			"total_tokens":         inTok + cacheRead + outTok,
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
