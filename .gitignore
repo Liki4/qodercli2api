@@ -21,3 +21,4 @@ re/codex-home/*
 !re/codex-home/config.toml
 # unrelated binary from another project
 claude2api-mac
+qodercli2api-mac
