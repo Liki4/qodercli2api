@@ -92,7 +92,9 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 			} else {
 				um.Content = respPartsToOAI(it.Content)
 			}
-			if txt := respPartsText(it.Content); txt != "" {
+			if it.Role == "user" {
+				um.Contents = respPartsToUpstream(it.Content)
+			} else if txt := respPartsText(it.Content); txt != "" {
 				um.Contents = []upPart{{Type: "text", Text: txt}}
 			}
 			msgs = append(msgs, um)
@@ -162,6 +164,23 @@ func respPartsToOAI(raw json.RawMessage) any {
 				URL string `json:"url"`
 			}{URL: p.ImageURL}
 			out = append(out, pp)
+		}
+	}
+	return out
+}
+
+func respPartsToUpstream(raw json.RawMessage) []upPart {
+	parts := parseRespParts(raw)
+	out := make([]upPart, 0, len(parts))
+	for _, p := range parts {
+		switch p.Type {
+		case "input_text", "output_text", "text":
+			out = append(out, upPart{Type: "text", Text: p.Text})
+		case "input_image":
+			out = append(out, upPart{
+				Type:     "image_url",
+				ImageURL: &upImageURL{URL: p.ImageURL},
+			})
 		}
 	}
 	return out
