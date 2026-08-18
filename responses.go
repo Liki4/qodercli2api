@@ -80,7 +80,17 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 	}
 	for _, it := range items {
 		switch it.Type {
-		case "message":
+		case "message", "":
+			// Hermes (and some other Responses clients) send input items in the
+			// compact chat form {"role": "user", "content": "..."} with no
+			// `type` field. Treat a missing/empty type as a message so the user
+			// text is not silently dropped. See: ds4f "model can't see user"
+			// reports through Hermes -> sub2api -> qodercli2api.
+			if it.Type == "" && it.Role == "" && it.Content == nil && it.CallID == "" && it.Output == "" {
+				// not a recognizable message item; keep old default behavior
+				flushAssistant()
+				continue
+			}
 			flushAssistant()
 			if it.Role == "system" || it.Role == "developer" {
 				sysParts = append(sysParts, respPartsText(it.Content))
