@@ -416,6 +416,8 @@ func (s *server) doUpstream(ctx context.Context, body []byte, mc *modelConfig) (
 		return nil, err
 	}
 	req.Header = ir.Header.Clone()
+	req.Header = applyInferenceClientIdentity(req.Header)
+	req.Header = applyCommonClientIdentity(req.Header)
 	return s.httpc.Do(req)
 }
 
@@ -897,6 +899,11 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	list := make([]modelListItem, 0, len(s.models.byKey))
 	for _, mc := range s.models.byKey {
+		// Known disabled entries stay in the resolver inventory so they cannot
+		// be re-created as enabled synthetics, but they must not be advertised.
+		if !mc.Enable {
+			continue
+		}
 		name := strings.TrimSpace(mc.DisplayName)
 		if name == "" {
 			name = mc.Key

@@ -50,6 +50,11 @@ type inferExpected struct {
 }
 
 func verifyFixtures(ctx context.Context, source []byte, fixtures fixtureSet, out io.Writer) (freeAccounting, error) {
+	for _, fixture := range fixtures {
+		if err := validateWASMForIdentity(source, fixture.Oracle); err != nil {
+			return freeAccounting{}, err
+		}
+	}
 	backend, err := newWASMBackend(ctx, source)
 	if err != nil {
 		return freeAccounting{}, err
@@ -127,6 +132,12 @@ func verifyFixtures(ctx context.Context, source []byte, fixtures fixtureSet, out
 	}
 	if backend.accounting.ResultStrings != 9 || backend.accounting.Contexts != 2 || backend.accounting.RequestResults != 2 {
 		return backend.accounting, fail("free-accounting")
+	}
+	if fixture, ok := fixtures["compatibility.json"]; ok {
+		if err := verifyCompatibility(ctx, source, fixture, fixture.Oracle.Version); err != nil {
+			return backend.accounting, err
+		}
+		emitStatus(out, statusLine{"compatibility", "cases:33", "PASS", ""})
 	}
 	return backend.accounting, nil
 }

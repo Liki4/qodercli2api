@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,126 @@ func authorizedPaths(t *testing.T) (string, string) {
 		t.Skip("explicit authorized WASM and fixture paths are required")
 	}
 	return wasmPath, fixturePath
+}
+
+func TestAuthorizedCompatibilityHostOrder(t *testing.T) {
+	path := os.Getenv("QODER2API_WASM_CAPTURE_ORACLE")
+	if path == "" {
+		t.Skip("explicit capture oracle is required")
+	}
+	source, err := readBoundedRegularFile(path, upgradeWASMSize, "wasm-read")
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	backend, err := newWASMBackend(context.Background(), source)
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	defer backend.Close(context.Background())
+	for i, test := range syntheticCompatibilityInput().Cases {
+		host := newCaptureHost()
+		backend.setReplay(host)
+		result, err := runCompatibilityCase(context.Background(), backend, test, upgradeVersion)
+		if err != nil {
+			t.Fatalf("case %d operation %s category %s", i, test.Operation, categoryOf(err))
+		}
+		if !reflect.DeepEqual(host.calls, compatibilityCalls(test)) {
+			t.Errorf("case %d operation %s calls %v failed=%t", i, test.Operation, host.calls, result.Failed)
+		}
+	}
+}
+
+func TestAuthorizedCaptureIsIndependentAndReplays(t *testing.T) {
+	wasmPath := os.Getenv("QODER2API_WASM_CAPTURE_ORACLE")
+	seedPath := os.Getenv("QODER2API_WASM_CAPTURE_SEEDS")
+	if wasmPath == "" || seedPath == "" {
+		t.Skip("explicit capture oracle and synthetic seed paths are required")
+	}
+	destination := filepath.Join(t.TempDir(), "captured")
+	var out bytes.Buffer
+	args := []string{"--wasm", wasmPath, "--fixtures", seedPath, "--version", "1.1.74", "--output", destination, "capture-fixtures"}
+	if status := run(context.Background(), args, &out); status != 0 {
+		t.Fatalf("capture status=%d safe-output=%s", status, out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(destination, "infer-user.json"))
+	if err != nil {
+		t.Fatal("missing captured infer fixture")
+	}
+	var fixture fixtureDocument
+	if err := decodeCanonicalJSON(data, &fixture); err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	input, _ := mustDecode[inferInput](fixture.Input)
+	expected, _ := mustDecode[inferExpected](fixture.Expected)
+	if fixture.Oracle.Version != "1.1.74" || input.Version != "1.1.74" || len(expected.Header) != 22 || expected.Header["Cosy-Version"][0] != "1.1.74" {
+		t.Fatal("capture did not use the new context version and raw WASM headers")
+	}
+	if _, err := os.Stat(filepath.Join(destination, "compatibility.json")); err != nil {
+		t.Fatal("capture omitted body and malformed-input comparisons")
+	}
+	out.Reset()
+	if status := run(context.Background(), args, &out); status == 0 {
+		t.Fatal("capture overwrote an existing destination")
+	}
+	for _, forbidden := range []string{"Authorization", "synthetic-access-token", "synthetic-user", "Bearer", destination, wasmPath} {
+		if strings.Contains(out.String(), forbidden) {
+			t.Fatal("capture output leaked content")
+		}
+	}
+}
+
+func TestAuthorizedWASMRejectsMismatchedFixtureIdentity(t *testing.T) {
+	wasmPath, fixturePath := authorizedPaths(t)
+	policy, err := policyForDirectory(fixturePath)
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	source, err := readBoundedRegularFile(wasmPath, int64(policy.Identity.Size), "wasm-read")
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	fixtures, err := validateFixtureSet(fixturePath, policy)
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	otherVersion := upgradeVersion
+	if policy.Identity.Version == upgradeVersion {
+		otherVersion = pinnedVersion
+	}
+	other, _ := policyForVersion(otherVersion)
+	fixture := fixtures["credential.json"]
+	fixture.Oracle = other.Identity
+	fixtures["credential.json"] = fixture
+	if _, err := verifyFixtures(context.Background(), source, fixtures, &bytes.Buffer{}); err == nil {
+		t.Fatal("mismatched oracle/fixture identity accepted")
+	}
+}
+
+func TestAuthorizedWASMCompatibility(t *testing.T) {
+	wasmPath, fixturePath := authorizedPaths(t)
+	compatibilityPath := os.Getenv("QODER2API_WASM_COMPATIBILITY_FIXTURES")
+	if compatibilityPath == "" {
+		t.Skip("explicit compatibility fixture path is required")
+	}
+	policy, err := policyForDirectory(fixturePath)
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	source, err := readBoundedRegularFile(wasmPath, int64(policy.Identity.Size), "wasm-read")
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	if err := validateWASMForIdentity(source, policy.Identity); err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	upgrade, _ := policyForVersion(upgradeVersion)
+	fixtures, err := validateFixtureSet(compatibilityPath, upgrade)
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	if err := verifyCompatibility(context.Background(), source, fixtures["compatibility.json"], policy.Identity.Version); err != nil {
+		t.Fatal(categoryOf(err))
+	}
 }
 
 func TestAuthorizedWASMFixtureIntegration(t *testing.T) {
@@ -107,7 +228,10 @@ func TestAuthorizedRecomputedManifestNestedTamperingRejected(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := copyFrozenFixtureSet(t, fixturePath)
-			policy := pinnedPolicy()
+			policy, err := policyForDirectory(fixturePath)
+			if err != nil {
+				t.Fatal(categoryOf(err))
+			}
 			policy.DocumentHashes = cloneMap(policy.DocumentHashes)
 			path := filepath.Join(dir, test.document)
 			data, err := os.ReadFile(path)
@@ -143,7 +267,11 @@ func TestAuthorizedRecomputedManifestNestedTamperingRejected(t *testing.T) {
 func copyFrozenFixtureSet(t *testing.T, source string) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range fixtureJSONNames {
+	policy, err := policyForDirectory(source)
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	for _, name := range append(fixtureNamesForVersion(policy.Identity.Version), "manifest.json") {
 		data, err := os.ReadFile(filepath.Join(source, name))
 		if err != nil {
 			t.Fatal(err)
@@ -157,11 +285,15 @@ func copyFrozenFixtureSet(t *testing.T, source string) string {
 
 func TestAuthorizedWASMFreeAccounting(t *testing.T) {
 	wasmPath, fixturePath := authorizedPaths(t)
-	source, err := readBoundedRegularFile(wasmPath, pinnedWASMSize, "wasm-read")
+	policy, err := policyForDirectory(fixturePath)
 	if err != nil {
 		t.Fatal(categoryOf(err))
 	}
-	fixtures, err := validateFixtureSet(fixturePath, pinnedPolicy())
+	source, err := readBoundedRegularFile(wasmPath, int64(policy.Identity.Size), "wasm-read")
+	if err != nil {
+		t.Fatal(categoryOf(err))
+	}
+	fixtures, err := validateFixtureSet(fixturePath, policy)
 	if err != nil {
 		t.Fatal(categoryOf(err))
 	}

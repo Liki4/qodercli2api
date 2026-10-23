@@ -247,9 +247,10 @@ func nativeInferPerturbationVectors() []nativeInferPerturbationVector {
 }
 
 func nativeInferVectorConfig() protocolContextConfig {
+	// These signature vectors were captured from the historical oracle.
 	return protocolContextConfig{
 		MachineID: "00000000-1111-4222-8333-444444444444",
-		Version:   qoderProtocolVersion,
+		Version:   protocolFixtureIdentity.Version,
 		User: protocolUserInfo{
 			UID:              "synthetic-vector-user",
 			EncryptUserInfo:  "synthetic-vector-info",
@@ -909,6 +910,7 @@ func TestNativeInferPrepareBuildsExactRequest(t *testing.T) {
 		entropy: entropy,
 	}
 	snapshot := syntheticNativeInferSnapshot(protocolHostDeps{Clock: host, Entropy: host})
+	snapshot.version = protocolFixtureIdentity.Version // Historical payload/signature below.
 	input := syntheticNativeInferInput()
 
 	got, err := prepareNativeInferRequest(context.Background(), snapshot, input)
@@ -967,7 +969,7 @@ func TestNativeInferPrepareBuildsExactRequest(t *testing.T) {
 		"Cosy-MachineType":      {"5"},
 		"Cosy-Scene":            {"assistant"},
 		"Cosy-User":             {"synthetic-user"},
-		"Cosy-Version":          {qoderProtocolVersion},
+		"Cosy-Version":          {snapshot.version},
 		"Login-Version":         {"v2"},
 		"X-Model-Key":           {"synthetic-model"},
 		"X-Model-Source":        {"custom"},
@@ -1142,9 +1144,14 @@ func TestNativeInferPayloadUsesFixedOrderAndContextVersion(t *testing.T) {
 		wantRaw []byte
 	}{
 		{
-			name:    "pinned protocol version",
-			version: qoderProtocolVersion,
+			name:    "historical protocol version",
+			version: protocolFixtureIdentity.Version,
 			wantRaw: []byte(`{"version":"v1","requestId":"00112233-4455-4677-8899-aabbccddeeff","info":"synthetic-info+/=","cosyVersion":"1.1.34","ideVersion":""}`),
+		},
+		{
+			name:    "production protocol version",
+			version: qoderProtocolVersion,
+			wantRaw: []byte(`{"version":"v1","requestId":"00112233-4455-4677-8899-aabbccddeeff","info":"synthetic-info+/=","cosyVersion":"1.1.74","ideVersion":""}`),
 		},
 		{
 			name:    "context version perturbation",

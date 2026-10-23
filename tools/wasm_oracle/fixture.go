@@ -16,10 +16,13 @@ import (
 )
 
 const (
-	pinnedVersion  = "1.1.34"
-	pinnedWASMSize = 297238
-	pinnedWASMHash = "b3ddd7c9235cea51a965582506fa6281bb298ddab782ff3edb3f9015da2468d4"
-	maxFixtureSize = 2 << 20
+	pinnedVersion   = "1.1.34"
+	pinnedWASMSize  = 297238
+	pinnedWASMHash  = "b3ddd7c9235cea51a965582506fa6281bb298ddab782ff3edb3f9015da2468d4"
+	upgradeVersion  = "1.1.74"
+	upgradeWASMSize = 298606
+	upgradeWASMHash = "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"
+	maxFixtureSize  = 2 << 20
 )
 
 var (
@@ -117,13 +120,25 @@ func validateFixtureSafety(_ string, data []byte) error {
 	return nil
 }
 
-func validateInventory(dir string) error {
+func fixtureNamesForVersion(version string) []string {
+	names := append([]string(nil), fixtureNames...)
+	if version == upgradeVersion {
+		names = append(names, "compatibility.json")
+	}
+	return names
+}
+
+func validateInventory(dir string) error { return validateVersionInventory(dir, pinnedVersion) }
+
+func validateVersionInventory(dir, version string) error {
+	expected := append(fixtureNamesForVersion(version), "manifest.json")
+	sort.Strings(expected)
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fail("fixture-inventory")
 	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != len(fixtureJSONNames) {
+	if err != nil || len(entries) != len(expected) {
 		return fail("fixture-inventory")
 	}
 	got := make([]string, 0, len(entries))
@@ -136,7 +151,7 @@ func validateInventory(dir string) error {
 		got = append(got, entry.Name())
 	}
 	sort.Strings(got)
-	if !reflect.DeepEqual(got, fixtureJSONNames) {
+	if !reflect.DeepEqual(got, expected) {
 		return fail("fixture-inventory")
 	}
 	return nil
@@ -184,9 +199,6 @@ func decodeStrictObject(data []byte, destination any, keys []string) error {
 }
 
 func validateFixtureSet(dir string, policy fixturePolicy) (fixtureSet, error) {
-	if err := validateInventory(dir); err != nil {
-		return nil, err
-	}
 	manifestData, err := readBoundedRegularFile(filepath.Join(dir, "manifest.json"), maxFixtureSize, "fixture-read")
 	if err != nil {
 		return nil, err
@@ -204,8 +216,12 @@ func validateFixtureSet(dir string, policy fixturePolicy) (fixtureSet, error) {
 	if !reflect.DeepEqual(manifest.Documents, policy.DocumentHashes) {
 		return nil, fail("fixture-manifest-hash")
 	}
-	fixtures := make(fixtureSet, len(fixtureNames))
-	for _, name := range fixtureNames {
+	if err := validateVersionInventory(dir, policy.Identity.Version); err != nil {
+		return nil, err
+	}
+	names := fixtureNamesForVersion(policy.Identity.Version)
+	fixtures := make(fixtureSet, len(names))
+	for _, name := range names {
 		data, err := readBoundedRegularFile(filepath.Join(dir, name), maxFixtureSize, "fixture-read")
 		if err != nil {
 			return nil, err
@@ -235,8 +251,54 @@ func validateFixtureSet(dir string, policy fixturePolicy) (fixtureSet, error) {
 	return fixtures, nil
 }
 
+// The historical pin is intentionally independent of the production version.
+// Local 1.1.12 bytes match this historical 1.1.34 identity; this is not evidence
+// that the local CLI itself was version 1.1.34.
 func pinnedPolicy() fixturePolicy {
 	return fixturePolicy{Identity: oracleIdentity{pinnedVersion, pinnedWASMSize, pinnedWASMHash}, DocumentHashes: pinnedDocumentHashes}
+}
+
+func policyForVersion(version string) (fixturePolicy, error) {
+	switch version {
+	case pinnedVersion:
+		return pinnedPolicy(), nil
+	case upgradeVersion:
+		return fixturePolicy{Identity: oracleIdentity{upgradeVersion, upgradeWASMSize, upgradeWASMHash}, DocumentHashes: upgradeDocumentHashes}, nil
+	default:
+		return fixturePolicy{}, fail("fixture-oracle-identity")
+	}
+}
+
+var upgradeDocumentHashes = map[string]string{
+	"compatibility.json":     "867fc46e79433a4b5c0c18eda59118203a064884408b31c0d2f1cb28940ef320",
+	"credential.json":        "f976e8464cc3984269fa986538892e231ce0763c757a3ca2175b995a8ecce6e2",
+	"infer-user-no-org.json": "65447bc0e8ec7be7f5687b04b7bbfe08d98b2aea1ec8e5dffe8171a897dfd668",
+	"infer-user.json":        "a9e7341e45cc32a81ef814bd79bb8c833972796f7fe34d55e90cf36aeb11f549",
+	"model-cache.json":       "0344ac2f3680cd29ea3fddd69d57ca5923ab0e3cf62891e29a16970a295e03a0",
+	"runtime-fields.json":    "bbc45fab848a4aee116ed0670d51b0e14e66494c1ef4d8df9e0e2da6239eb734",
+}
+
+func policyForIdentity(identity oracleIdentity) (fixturePolicy, error) {
+	policy, err := policyForVersion(identity.Version)
+	if err != nil || policy.Identity != identity {
+		return fixturePolicy{}, fail("fixture-oracle-identity")
+	}
+	return policy, nil
+}
+
+func policyForDirectory(dir string) (fixturePolicy, error) {
+	data, err := readBoundedRegularFile(filepath.Join(dir, "manifest.json"), maxFixtureSize, "fixture-read")
+	if err != nil {
+		return fixturePolicy{}, err
+	}
+	if err := validateFixtureSafety("manifest.json", data); err != nil {
+		return fixturePolicy{}, err
+	}
+	var manifest fixtureManifest
+	if err := decodeCanonicalJSON(data, &manifest); err != nil {
+		return fixturePolicy{}, err
+	}
+	return policyForIdentity(oracleIdentity{manifest.Version, manifest.Size, manifest.SHA256})
 }
 
 func validateFixtureSchema(name string, fixture fixtureDocument) error {
@@ -262,11 +324,24 @@ func compactJSON(raw json.RawMessage) (string, error) {
 	return string(data), nil
 }
 func validateWASM(data []byte) error {
-	if len(data) != pinnedWASMSize {
+	for _, version := range []string{pinnedVersion, upgradeVersion} {
+		policy, _ := policyForVersion(version)
+		if len(data) == policy.Identity.Size {
+			return validateWASMForIdentity(data, policy.Identity)
+		}
+	}
+	return fail("wasm-identity-size")
+}
+
+func validateWASMForIdentity(data []byte, identity oracleIdentity) error {
+	if _, err := policyForIdentity(identity); err != nil {
+		return err
+	}
+	if len(data) != identity.Size {
 		return fail("wasm-identity-size")
 	}
 	sum := sha256.Sum256(data)
-	if fmt.Sprintf("%x", sum) != pinnedWASMHash {
+	if fmt.Sprintf("%x", sum) != identity.SHA256 {
 		return fail("wasm-identity-sha256")
 	}
 	return nil

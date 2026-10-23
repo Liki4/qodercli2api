@@ -226,6 +226,8 @@ func TestParseAppConfigDefaultsMatchCurrentCLI(t *testing.T) {
 		t.Fatalf("parseAppConfig() error = %v", err)
 	}
 	want := appConfig{
+		region:      "global",
+		webEndpoint: defaultBase, openapiEndpoint: defaultOpenapi, inferEndpoint: defaultInfer,
 		addr:         ":8377",
 		authDir:      filepath.Join(homeDir(), ".qoder", ".auth"),
 		defaultModel: "auto",
@@ -291,7 +293,6 @@ func TestParseAppConfigFlagsOverrideEnvironment(t *testing.T) {
 		"-model-1m=flag-1m",
 		"-catalog=/flag/catalog.json",
 		"-dump-dir=/flag/dumps",
-		"-login",
 		"-login-pat=flag-pat",
 		"-v=false",
 	}
@@ -303,7 +304,7 @@ func TestParseAppConfigFlagsOverrideEnvironment(t *testing.T) {
 		cfg.inferEndpoint != "https://flag-infer.example.test" || cfg.openapiEndpoint != "https://flag-openapi.example.test" ||
 		cfg.webEndpoint != "https://flag-web.example.test" || cfg.modelMapJSON != `{"flag":"ultimate"}` ||
 		cfg.defaultModel != "flag-default" || cfg.oneMModel != "flag-1m" || cfg.catalogPath != "/flag/catalog.json" ||
-		cfg.dumpDir != "/flag/dumps" || !cfg.login || cfg.loginPAT != "flag-pat" || cfg.verbose {
+		cfg.dumpDir != "/flag/dumps" || cfg.login || cfg.loginPAT != "flag-pat" || cfg.verbose {
 		t.Fatalf("flag config = %#v", cfg)
 	}
 }

@@ -1,0 +1,694 @@
+{
+  "oracle": {
+    "version": "1.1.74",
+    "size": 298606,
+    "sha256": "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"
+  },
+  "input": {
+    "cases": [
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          ""
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "{}"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "{ }"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "{\"text\":\"合成🙂\"}"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "synthetic\u0000body"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "x"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "xy"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "xyz"
+        ]
+      },
+      {
+        "operation": "body-roundtrip",
+        "args": [
+          "synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "a"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "ab"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "abc"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "????"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "_$__"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "kwm"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "$kwm$"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "$k\rwm"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "$k\nwm"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "$kwm?"
+        ]
+      },
+      {
+        "operation": "body-decode",
+        "args": [
+          "$d$_"
+        ]
+      },
+      {
+        "operation": "credential-encrypt",
+        "args": [
+          "synthetic-plain",
+          "short"
+        ]
+      },
+      {
+        "operation": "credential-decrypt",
+        "args": [
+          "",
+          "00000000-1111-42"
+        ]
+      },
+      {
+        "operation": "credential-decrypt",
+        "args": [
+          "!!!!",
+          "00000000-1111-42"
+        ]
+      },
+      {
+        "operation": "credential-decrypt",
+        "args": [
+          "AAAA",
+          "00000000-1111-42"
+        ]
+      },
+      {
+        "operation": "credential-decrypt",
+        "args": [
+          "YWI",
+          "00000000-1111-42"
+        ]
+      },
+      {
+        "operation": "credential-decrypt",
+        "args": [
+          "YWI=garbage",
+          "00000000-1111-42"
+        ]
+      },
+      {
+        "operation": "runtime",
+        "args": [
+          "{"
+        ]
+      },
+      {
+        "operation": "runtime",
+        "args": [
+          "{}"
+        ]
+      },
+      {
+        "operation": "runtime",
+        "args": [
+          "{\"uid\":null}"
+        ]
+      },
+      {
+        "operation": "runtime",
+        "args": [
+          "{\"uid\":\"synthetic-user-0001\",\"organization_tags\":1}"
+        ]
+      },
+      {
+        "operation": "model-decrypt",
+        "args": [
+          "",
+          "synthetic-user-0001"
+        ]
+      },
+      {
+        "operation": "model-decrypt",
+        "args": [
+          "!!!!",
+          "synthetic-user-0001"
+        ]
+      },
+      {
+        "operation": "model-decrypt",
+        "args": [
+          "UU1DAQ==",
+          "synthetic-user-0001"
+        ]
+      }
+    ]
+  },
+  "transcript": {
+    "unix_milli": null,
+    "entropy_reads": []
+  },
+  "expected": {
+    "results": [
+      {
+        "output": "",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "$kwm",
+        "decoded": "{}",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "WYdm",
+        "decoded": "{ }",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "pqKAD\u0026*KWMn*QDoBQn*mYKwDxiwB",
+        "decoded": "{\"text\":\"合成🙂\"}",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "KbDZz$iLJHLM_HNkLhJH",
+        "decoded": "synthetic\u0000body",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "$_$m",
+        "decoded": "x",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "$Zzm",
+        "decoded": "xy",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "yZLm",
+        "decoded": "xyz",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "iLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Yw$C)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDxC)#Y.^mSQwPHFwPSVtNkLhJHiLJHLMGxjQuECnDx",
+        "decoded": "synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-synthetic-",
+        "failed": false,
+        "transcript": {
+          "unix_milli": [
+            1781000123456
+          ],
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            },
+            {
+              "length": 16,
+              "bytes": "fn+AgYKDhIWGh4iJiouMjQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "R",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "\u0000",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "{M",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "{}",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "{}",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "\u0000",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "{\"encrypt_user_info\":\"OVlsd0zgK2A+jKGMAmNfAg==\",\"key\":\"nKeC6jJtXTWF4TpnVNnxMT/6jY0gBZfCPfjQaKbIi0lS+j2REWVXO5f6BzlvfEvHCrC+UY7rBMZfYs/C72KNYVIH2HLAR8E1yPDAGvV2xViMw029bXcMVa9ib0vyaM4IEu7HJlNHzUXTJOvEBB4YUAyxTCysQ/oYct/JIpRNg7I=\"}",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "{\"encrypt_user_info\":\"vD690HkJtGRenFc1ZiMWsA==\",\"key\":\"nKeC6jJtXTWF4TpnVNnxMT/6jY0gBZfCPfjQaKbIi0lS+j2REWVXO5f6BzlvfEvHCrC+UY7rBMZfYs/C72KNYVIH2HLAR8E1yPDAGvV2xViMw029bXcMVa9ib0vyaM4IEu7HJlNHzUXTJOvEBB4YUAyxTCysQ/oYct/JIpRNg7I=\"}",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "{\"encrypt_user_info\":\"v//gwmxcBzgwDlhMuWXwbQ==\",\"key\":\"nKeC6jJtXTWF4TpnVNnxMT/6jY0gBZfCPfjQaKbIi0lS+j2REWVXO5f6BzlvfEvHCrC+UY7rBMZfYs/C72KNYVIH2HLAR8E1yPDAGvV2xViMw029bXcMVa9ib0vyaM4IEu7HJlNHzUXTJOvEBB4YUAyxTCysQ/oYct/JIpRNg7I=\"}",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "{\"encrypt_user_info\":\"A2MBsulMvdx5p3X6li/3gjwEdVeJ/EkXILah2VTr118B906+d+nX8W79TUPObptGHUiaDjcjgKN2rxdbaCBDMA==\",\"key\":\"nKeC6jJtXTWF4TpnVNnxMT/6jY0gBZfCPfjQaKbIi0lS+j2REWVXO5f6BzlvfEvHCrC+UY7rBMZfYs/C72KNYVIH2HLAR8E1yPDAGvV2xViMw029bXcMVa9ib0vyaM4IEu7HJlNHzUXTJOvEBB4YUAyxTCysQ/oYct/JIpRNg7I=\"}",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": [
+            {
+              "length": 16,
+              "bytes": "AQIDBAUGBwgJCgsMDQ4PEA=="
+            },
+            {
+              "length": 109,
+              "bytes": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fQ=="
+            }
+          ]
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "!!!!",
+        "decoded": "",
+        "failed": false,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      },
+      {
+        "output": "",
+        "decoded": "",
+        "failed": true,
+        "transcript": {
+          "unix_milli": null,
+          "entropy_reads": []
+        }
+      }
+    ]
+  }
+}

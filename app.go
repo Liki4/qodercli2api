@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +32,8 @@ func (s *trackedString) Set(value string) error {
 }
 
 type appConfig struct {
+	region          string
+	envPAT          string
 	addr            string
 	sk              string
 	authDir         string
@@ -68,19 +69,23 @@ func parseAppConfig(args []string, lookupEnv func(string) (string, bool), output
 
 	var cfg appConfig
 	skFlag := trackedString{}
+	regionFlag := trackedString{}
+	patFlag := trackedString{}
+	inferFlag, openapiFlag, webFlag := trackedString{}, trackedString{}, trackedString{}
+	fs.Var(&regionFlag, "region", "region: global or cn (default global)")
 	fs.StringVar(&cfg.addr, "addr", lookupEnvOr(lookupEnv, "QODER2API_ADDR", ":8377"), "listen address")
 	fs.Var(&skFlag, "sk", "api key (sk-...) clients must present; empty disables auth check")
-	fs.StringVar(&cfg.authDir, "auth-dir", lookupEnvOr(lookupEnv, "QODER2API_AUTH_DIR", filepath.Join(homeDir(), ".qoder", ".auth")), "qoder auth dir (contains user + machine_id)")
-	fs.StringVar(&cfg.inferEndpoint, "endpoint", lookupEnvOr(lookupEnv, "QODER2API_INFER_ENDPOINT", ""), "inference endpoint override")
-	fs.StringVar(&cfg.openapiEndpoint, "openapi-endpoint", lookupEnvOr(lookupEnv, "QODER2API_OPENAPI_ENDPOINT", ""), "openapi endpoint override")
-	fs.StringVar(&cfg.webEndpoint, "web-endpoint", lookupEnvOr(lookupEnv, "QODER2API_WEB_ENDPOINT", ""), "web base endpoint override")
+	fs.StringVar(&cfg.authDir, "auth-dir", lookupEnvOr(lookupEnv, "QODER2API_AUTH_DIR", ""), "qoder auth dir (contains user + machine_id)")
+	fs.Var(&inferFlag, "endpoint", "inference endpoint override")
+	fs.Var(&openapiFlag, "openapi-endpoint", "openapi endpoint override")
+	fs.Var(&webFlag, "web-endpoint", "web base endpoint override")
 	fs.StringVar(&cfg.modelMapJSON, "model-map", lookupEnvOr(lookupEnv, "QODER2API_MODEL_MAP", ""), `JSON map anthropic-model -> qoder key, e.g. {"claude-sonnet-4-5":"auto","*":"auto"}`)
 	fs.StringVar(&cfg.defaultModel, "default-model", lookupEnvOr(lookupEnv, "QODER2API_DEFAULT_MODEL", "auto"), "fallback qoder model key")
 	fs.StringVar(&cfg.oneMModel, "model-1m", lookupEnvOr(lookupEnv, "QODER2API_MODEL_1M", "ultimate"), "qoder model key used when client requests 1M context via [1m] suffix")
-	fs.StringVar(&cfg.catalogPath, "catalog", lookupEnvOr(lookupEnv, "QODER2API_CATALOG", ""), "path to decrypted catalog-v6 json (optional)")
+	fs.StringVar(&cfg.catalogPath, "catalog", lookupEnvOr(lookupEnv, "QODER2API_CATALOG", ""), "path to decrypted model catalog json (v6 or v7 schema; optional)")
 	fs.StringVar(&cfg.dumpDir, "dump-dir", lookupEnvOr(lookupEnv, "QODER2API_DUMP_DIR", ""), "when set, dump plaintext bodies of failing upstream requests here for debugging")
 	fs.BoolVar(&cfg.login, "login", false, "run device flow login then exit")
-	fs.StringVar(&cfg.loginPAT, "login-pat", "", "login with a personal access token then exit")
+	fs.Var(&patFlag, "login-pat", "login with a personal access token then exit")
 	fs.BoolVar(&cfg.verbose, "v", lookupEnvOr(lookupEnv, "QODER2API_LOG", "") == "debug", "verbose logging")
 
 	if err := fs.Parse(args); err != nil {
@@ -92,6 +97,40 @@ func parseAppConfig(args []string, lookupEnv func(string) (string, bool), output
 		cfg.sk = lookupEnvOr(lookupEnv, "QODER2API_SK", "")
 	}
 
+	for _, endpoint := range []struct {
+		flag   trackedString
+		target *string
+		env    string
+	}{
+		{inferFlag, &cfg.inferEndpoint, "QODER2API_INFER_ENDPOINT"}, {openapiFlag, &cfg.openapiEndpoint, "QODER2API_OPENAPI_ENDPOINT"}, {webFlag, &cfg.webEndpoint, "QODER2API_WEB_ENDPOINT"},
+	} {
+		*endpoint.target = lookupEnvOr(lookupEnv, endpoint.env, "")
+		if endpoint.flag.set {
+			*endpoint.target = endpoint.flag.value
+		}
+	}
+	invalidConfig := func(err error) (appConfig, error) { fmt.Fprintln(output, err); return appConfig{}, err }
+	if cfg.login && patFlag.set {
+		return invalidConfig(fmt.Errorf("-login and -login-pat are mutually exclusive"))
+	}
+	if patFlag.set && strings.TrimSpace(patFlag.value) == "" {
+		return invalidConfig(fmt.Errorf("-login-pat must not be empty"))
+	}
+	cfg.loginPAT = patFlag.value
+	cfg.region = lookupEnvOr(lookupEnv, "QODER2API_REGION", lookupEnvOr(lookupEnv, "QODER_REGION", "global"))
+	if regionFlag.set {
+		cfg.region = regionFlag.value
+	}
+	profile, err := resolveRegion(cfg.region)
+	if err != nil {
+		return invalidConfig(err)
+	}
+	if err := cfg.resolveProfile(lookupEnv); err != nil {
+		return invalidConfig(err)
+	}
+	if !cfg.login && !patFlag.set {
+		cfg.envPAT = lookupEnvOr(lookupEnv, profile.patEnv, "")
+	}
 	return cfg, nil
 }
 
@@ -108,23 +147,24 @@ func (t realAppTicker) C() <-chan time.Time { return t.ticker.C }
 func (t realAppTicker) Stop()               { t.ticker.Stop() }
 
 type appDeps struct {
-	newProtocolServices func(protocolHostDeps) (*protocolServices, error)
-	newAuthManager      func(*protocolServices, string, string, string, string, func(string, ...any)) (*authManager, error)
-	deviceLogin         func(context.Context, *authManager, io.Writer) error
-	patLogin            func(context.Context, *authManager, string) error
-	loadCredentials     func(context.Context, *authManager) error
-	ensureFresh         func(context.Context, *authManager) error
-	newTicker           func(time.Duration) appTicker
-	serverHandler       func(*server) http.Handler
-	listenAndServe      func(*http.Server) error
-	shutdown            func(context.Context, *http.Server) error
-	closeServer         func(*http.Server) error
+	newProtocolServices       func(protocolHostDeps) (*protocolServices, error)
+	newAuthManager            func(*protocolServices, string, string, string, string, func(string, ...any)) (*authManager, error)
+	newAuthManagerWithOptions func(*protocolServices, string, string, string, string, func(string, ...any), authManagerOptions) (*authManager, error)
+	deviceLogin               func(context.Context, *authManager, io.Writer) error
+	patLogin                  func(context.Context, *authManager, string) error
+	loadCredentials           func(context.Context, *authManager) error
+	ensureFresh               func(context.Context, *authManager) error
+	newTicker                 func(time.Duration) appTicker
+	serverHandler             func(*server) http.Handler
+	listenAndServe            func(*http.Server) error
+	shutdown                  func(context.Context, *http.Server) error
+	closeServer               func(*http.Server) error
 }
 
 func defaultAppDeps() appDeps {
 	return appDeps{
-		newProtocolServices: newProtocolServices,
-		newAuthManager:      newAuthManager,
+		newProtocolServices:       newProtocolServices,
+		newAuthManagerWithOptions: newAuthManagerWithOptions,
 		deviceLogin: func(ctx context.Context, manager *authManager, output io.Writer) error {
 			return manager.deviceLogin(ctx, output)
 		},
@@ -158,8 +198,8 @@ func (deps appDeps) withDefaults() appDeps {
 	if deps.newProtocolServices == nil {
 		deps.newProtocolServices = defaults.newProtocolServices
 	}
-	if deps.newAuthManager == nil {
-		deps.newAuthManager = defaults.newAuthManager
+	if deps.newAuthManagerWithOptions == nil {
+		deps.newAuthManagerWithOptions = defaults.newAuthManagerWithOptions
 	}
 	if deps.deviceLogin == nil {
 		deps.deviceLogin = defaults.deviceLogin
@@ -238,6 +278,9 @@ func (g *handlerAdmissionGate) wait() {
 }
 
 func run(parent context.Context, cfg appConfig, deps appDeps, stdout io.Writer, debugf, always func(string, ...any)) (err error) {
+	if err := cfg.resolveProfile(nil); err != nil {
+		return err
+	}
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -287,7 +330,12 @@ func run(parent context.Context, cfg appConfig, deps appDeps, stdout io.Writer, 
 	if initErr != nil {
 		return fmt.Errorf("init protocol services: %w", initErr)
 	}
-	auth, initErr = deps.newAuthManager(services, cfg.authDir, cfg.openapiEndpoint, cfg.inferEndpoint, cfg.webEndpoint, always)
+	ephemeralPAT := cfg.envPAT != "" && !cfg.login && cfg.loginPAT == ""
+	if deps.newAuthManager != nil && !ephemeralPAT {
+		auth, initErr = deps.newAuthManager(services, cfg.authDir, cfg.openapiEndpoint, cfg.inferEndpoint, cfg.webEndpoint, always)
+	} else {
+		auth, initErr = deps.newAuthManagerWithOptions(services, cfg.authDir, cfg.openapiEndpoint, cfg.inferEndpoint, cfg.webEndpoint, always, authManagerOptions{ctx: ctx, region: cfg.region, ephemeral: ephemeralPAT})
+	}
 	if initErr != nil {
 		return fmt.Errorf("init auth: %w", initErr)
 	}
@@ -306,7 +354,11 @@ func run(parent context.Context, cfg appConfig, deps appDeps, stdout io.Writer, 
 		return nil
 	}
 
-	if loadErr := deps.loadCredentials(ctx, auth); loadErr != nil {
+	if ephemeralPAT {
+		if loginErr := deps.patLogin(ctx, auth, cfg.envPAT); loginErr != nil {
+			return fmt.Errorf("environment PAT authentication: %w", loginErr)
+		}
+	} else if loadErr := deps.loadCredentials(ctx, auth); loadErr != nil {
 		return fmt.Errorf("no usable credentials in %s (%w). Run with -login to authenticate first.", cfg.authDir, loadErr)
 	}
 	auth.mu.Lock()

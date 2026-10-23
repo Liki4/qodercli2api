@@ -5,20 +5,31 @@ This project is an independent interoperability project and is not affiliated
 with, endorsed by, or sponsored by Qoder or Alibaba. Qoder, Alibaba, and
 related names and marks belong to their respective owners.
 
-This repository is licensed under the GNU Affero General Public License
+This project is licensed under the GNU Affero General Public License
 version 3.0 as provided in LICENSE.
 
-The production implementation is pure Go. This repository and its production
-binary do not distribute or embed Qoder CLI's qoder_auth WebAssembly module and
-do not depend on wazero.
+The production implementation is pure Go. The current source tree and
+production builds contain and distribute no Qoder CLI qoder_auth WebAssembly
+module. The root Go module and production builds do not depend on wazero.
+The optional standalone analysis tool under tools/wasm_oracle is a separate
+Go module with its own dependencies, including wazero.
+
+This statement about the current source tree and production builds does not
+apply to every historical revision: commit 09452a6 contained a vendor WASM
+asset, which was removed in commit baa9052. The Git history retains those
+revisions; removal from the current tree does not remove historical copies
+or grant redistribution rights to that asset.
 
 The optional analysis tools under tools/ can validate and execute an
-authorized, operator-supplied Qoder CLI 1.1.34 WebAssembly module as an external
-interoperability oracle. That external module is not part of this repository
-or this project's AGPL-3.0 license. Operators are responsible for confirming
-their right to possess and execute it and must not redistribute it without the
+authorized, operator-supplied, version-pinned Qoder CLI 1.1.34 or 1.1.74
+WebAssembly module as an external interoperability oracle. That external
+module is not included in the current source tree or covered by this
+project's AGPL-3.0 license. Operators are responsible for confirming their
+right to possess and execute it and must not redistribute it without the
 applicable permissions.
 
-This repository does not distribute Qoder CLI, user credentials, captured
-traffic, model catalogs, or local account data. Users must use their own
-authorized subscription and comply with applicable service terms and law.
+The current source tree does not distribute official Qoder CLI binaries,
+real user credentials, captured live traffic, private model catalogs, or
+local account data. Test fixtures contain synthetic data only. Users must
+use their own authorized account and subscription and comply with applicable
+service terms and law.

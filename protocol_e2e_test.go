@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,10 +26,12 @@ import (
 //	QODER2API_E2E=1 go test -tags=e2e . -run '^TestProtocolE2E(Native|DefaultNative)$' -count=1 -v
 //	QODER2API_E2E=1 QODER2API_E2E_REFRESH=1 go test -tags=e2e . -run '^TestProtocolE2ERefresh$' -count=1 -v
 //
-// The harness uses the production local auth directory and endpoints by default.
-// Content-silent overrides are available through QODER2API_E2E_AUTH_DIR,
-// QODER2API_E2E_INFER_ENDPOINT, QODER2API_E2E_OPENAPI_ENDPOINT, and
-// QODER2API_E2E_WEB_ENDPOINT. QODER2API_DUMP_DIR is deliberately ignored.
+// QODER2API_E2E_REGION selects global (default) or cn and its config root/endpoints.
+// Without the separate refresh opt-in, auth runs only against a private byte copy;
+// catalog reads still use the original source root. Content-silent overrides are
+// QODER2API_E2E_AUTH_DIR, QODER2API_E2E_INFER_ENDPOINT,
+// QODER2API_E2E_OPENAPI_ENDPOINT, and QODER2API_E2E_WEB_ENDPOINT.
+// QODER2API_DUMP_DIR and environment PAT discovery are deliberately ignored.
 
 const (
 	protocolE2ESetupTimeout   = 90 * time.Second
@@ -48,6 +51,7 @@ type protocolE2EResult struct {
 }
 
 type protocolE2EConfig struct {
+	region          string
 	authDir         string
 	inferEndpoint   string
 	openapiEndpoint string
@@ -637,6 +641,7 @@ type protocolE2EHarness struct {
 	refreshTransport *protocolE2ECountingTransport
 	denyRefresh      *protocolHarnessDenyTransport
 	readOnlyAuth     bool
+	sourceAuthFile   string
 	closeIdle        []func()
 	closeOnce        sync.Once
 	closeFailed      bool
@@ -924,17 +929,484 @@ func requireProtocolE2E(t *testing.T) {
 	}
 }
 
-func protocolE2EEnvironmentConfig() protocolE2EConfig {
-	authDir := strings.TrimSpace(os.Getenv("QODER2API_E2E_AUTH_DIR"))
-	if authDir == "" {
-		authDir = filepath.Join(homeDir(), ".qoder", ".auth")
+func TestProtocolE2EEnvironmentConfig(t *testing.T) {
+	globalRoot, cnRoot, override := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, test := range []struct {
+		name string
+		env  map[string]string
+		want protocolE2EConfig
+	}{
+		{"global-default", nil, protocolE2EConfig{region: "global", authDir: filepath.Join(homeDir(), ".qoder", ".auth"), inferEndpoint: defaultInfer, openapiEndpoint: defaultOpenapi, webEndpoint: defaultBase}},
+		{"cn-default", map[string]string{"QODER2API_E2E_REGION": "cn"}, protocolE2EConfig{region: "cn", authDir: filepath.Join(homeDir(), ".qoder-cn", ".auth"), inferEndpoint: "https://gateway.qoder.com.cn", openapiEndpoint: "https://openapi.qoder.com.cn", webEndpoint: "https://qoder.cn"}},
+		{"global-root", map[string]string{"QODER_CONFIG_DIR": globalRoot, "QODERCN_CONFIG_DIR": cnRoot}, protocolE2EConfig{region: "global", authDir: filepath.Join(globalRoot, ".auth"), inferEndpoint: defaultInfer, openapiEndpoint: defaultOpenapi, webEndpoint: defaultBase}},
+		{"cn-root", map[string]string{"QODER2API_E2E_REGION": "cn", "QODER_CONFIG_DIR": globalRoot, "QODERCN_CONFIG_DIR": cnRoot}, protocolE2EConfig{region: "cn", authDir: filepath.Join(cnRoot, ".auth"), inferEndpoint: "https://gateway.qoder.com.cn", openapiEndpoint: "https://openapi.qoder.com.cn", webEndpoint: "https://qoder.cn"}},
+		{"explicit-overrides", map[string]string{"QODER2API_E2E_REGION": "cn", "QODERCN_CONFIG_DIR": cnRoot, "QODER2API_E2E_AUTH_DIR": override, "QODER2API_E2E_INFER_ENDPOINT": "https://INFER.invalid/path///", "QODER2API_E2E_OPENAPI_ENDPOINT": "http://OPENAPI.invalid/base/", "QODER2API_E2E_WEB_ENDPOINT": "https://WEB.invalid/"}, protocolE2EConfig{region: "cn", authDir: override, inferEndpoint: "https://infer.invalid/path", openapiEndpoint: "http://openapi.invalid/base", webEndpoint: "https://web.invalid"}},
+		{"unrelated-region-pat-ignored", map[string]string{"QODER_REGION": "cn", "QODER2API_REGION": "cn", "QODER_PERSONAL_ACCESS_TOKEN": "synthetic-pat", "QODERCN_PERSONAL_ACCESS_TOKEN": "synthetic-cn-pat", "QODER2API_AUTH_DIR": override, "QODER2API_INFER_ENDPOINT": "https://unrelated.invalid"}, protocolE2EConfig{region: "global", authDir: filepath.Join(homeDir(), ".qoder", ".auth"), inferEndpoint: defaultInfer, openapiEndpoint: defaultOpenapi, webEndpoint: defaultBase}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lookup := func(key string) (string, bool) {
+				if !strings.HasPrefix(key, "QODER2API_E2E_") && key != "QODER_CONFIG_DIR" && key != "QODERCN_CONFIG_DIR" {
+					t.Errorf("E2E configuration read unrelated environment key %s", key)
+				}
+				return envLookup(test.env)(key)
+			}
+			got, err := protocolE2EEnvironmentConfig(lookup)
+			if err != nil || got != test.want {
+				t.Fatalf("synthetic config = %#v, error=%v, want %#v", got, err, test.want)
+			}
+		})
 	}
-	return protocolE2EConfig{
-		authDir:         authDir,
-		inferEndpoint:   strings.TrimSpace(os.Getenv("QODER2API_E2E_INFER_ENDPOINT")),
-		openapiEndpoint: strings.TrimSpace(os.Getenv("QODER2API_E2E_OPENAPI_ENDPOINT")),
-		webEndpoint:     strings.TrimSpace(os.Getenv("QODER2API_E2E_WEB_ENDPOINT")),
+	for _, key := range []string{"QODER2API_E2E_REGION", "QODER2API_E2E_INFER_ENDPOINT", "QODER2API_E2E_OPENAPI_ENDPOINT", "QODER2API_E2E_WEB_ENDPOINT"} {
+		values := []string{"ftp://invalid.invalid", "https://user:secret@invalid.invalid", "https://invalid.invalid/?secret=value", "https://invalid.invalid/#secret", "https://invalid.invalid:0", " https://invalid.invalid", "https://invalid.invalid\n"}
+		if key == "QODER2API_E2E_REGION" {
+			values = []string{"other", "CN", " cn "}
+		}
+		for _, value := range values {
+			if _, err := protocolE2EEnvironmentConfig(envLookup(map[string]string{key: value})); err == nil || strings.Contains(err.Error(), value) || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("invalid configuration key %s was accepted or exposed its value", key)
+			}
+		}
 	}
+}
+
+func protocolE2ESyntheticAuthStore(t *testing.T, region string, binding bool) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), ".auth")
+	if err := os.Mkdir(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	machineID := "01234567-89ab-4cde-8fab-0123456789ab"
+	plain, err := json.Marshal(&userInfo{UID: "synthetic-e2e-user", SecurityOAuthToken: "synthetic-e2e-token", RefreshToken: "synthetic-e2e-refresh", ExpireTime: time.Now().Add(2 * time.Hour).Unix(), LoginMethod: "oauth"})
+	if err != nil {
+		t.Fatal("synthetic credential serialization failed")
+	}
+	cipher, err := (nativeCredentialCodec{}).Encrypt(context.Background(), string(plain), machineCredentialKey(machineID))
+	if err != nil {
+		t.Fatal("synthetic credential encryption failed")
+	}
+	files := map[string][]byte{"machine_id": []byte(machineID + "\n"), "user": []byte(cipher + "\n"), "unrelated": []byte("do-not-copy")}
+	if binding {
+		profile, err := resolveRegion(region)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.MarshalIndent(authBinding{Version: 1, Region: region, Issuer: profile.openapi, ClientID: prodClientID}, "", "  ")
+		if err != nil {
+			t.Fatal("synthetic binding serialization failed")
+		}
+		files[authBindingName] = append(raw, '\n')
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0640); err != nil {
+			t.Fatal("synthetic auth file creation failed")
+		}
+	}
+	return dir
+}
+
+type protocolE2EFileSnapshot struct {
+	mode     os.FileMode
+	modified time.Time
+	data     string
+}
+
+func protocolE2ESnapshotTree(t *testing.T, root string) map[string]protocolE2EFileSnapshot {
+	t.Helper()
+	result := map[string]protocolE2EFileSnapshot{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		name, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		item := protocolE2EFileSnapshot{mode: info.Mode(), modified: info.ModTime()}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			item.data = string(data)
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			item.data, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+		}
+		result[name] = item
+		return nil
+	})
+	if err != nil {
+		t.Fatal("synthetic tree snapshot failed")
+	}
+	return result
+}
+
+func TestProtocolE2EAuthSetupReadOnlySource(t *testing.T) {
+	for _, region := range []string{"global", "cn"} {
+		for _, binding := range []bool{false, true} {
+			name := region + "/legacy"
+			if binding {
+				name = region + "/bound"
+			}
+			t.Run(name, func(t *testing.T) {
+				source := protocolE2ESyntheticAuthStore(t, region, binding)
+				before := protocolE2ESnapshotTree(t, source)
+				h, err := newProtocolE2EAuthHarness(t, context.Background(), false, envLookup(map[string]string{"QODER2API_E2E": "1", "QODER2API_E2E_AUTH_DIR": source, "QODER2API_E2E_REGION": region}))
+				if err != nil {
+					t.Fatal("synthetic auth setup failed", err)
+				}
+				if h.auth.authFile == filepath.Join(source, "user") || h.sourceAuthFile != filepath.Join(source, "user") || h.auth.store.ephemeral {
+					t.Error("read-only harness must use a persistent private copy and retain separate source path")
+				}
+				if h.auth.machineID != "01234567-89ab-4cde-8fab-0123456789ab" || h.auth.store.expected.Region != region || h.capabilities.credentialDecrypt.Load() != 1 || h.capabilities.contextNew.Load() != 1 || !protocolE2EHasUsableToken(h.auth) {
+					t.Error("copy did not decrypt/load with the selected region and original machine ID")
+				}
+				if h.denyRefresh == nil || h.auth.httpc.Transport != h.denyRefresh || h.denyRefresh.calls.Load() != 0 {
+					t.Error("read-only auth HTTP was not disabled")
+				}
+				copyDir := filepath.Dir(h.auth.authFile)
+				if info, err := os.Stat(copyDir); err != nil || info.Mode().Perm() != 0700 {
+					t.Error("private auth directory is not 0700")
+				}
+				for _, file := range []string{"user", "machine_id", authBindingName} {
+					data, err := os.ReadFile(filepath.Join(copyDir, file))
+					original, exists := before[file]
+					if !exists {
+						if !errors.Is(err, os.ErrNotExist) {
+							t.Error("optional absent binding was created")
+						}
+						continue
+					}
+					if err != nil || string(data) != original.data {
+						t.Error("allowlisted auth bytes changed")
+					}
+					info, err := os.Stat(filepath.Join(copyDir, file))
+					sourceInfo, sourceErr := os.Stat(filepath.Join(source, file))
+					if err != nil || sourceErr != nil || info.Mode().Perm() != 0600 || os.SameFile(info, sourceInfo) {
+						t.Error("auth copy must be a separate 0600 regular file")
+					}
+				}
+				if _, err := os.Lstat(filepath.Join(copyDir, "unrelated")); !errors.Is(err, os.ErrNotExist) {
+					t.Error("unrelated auth file was copied")
+				}
+				if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+					t.Error("source tree changed during construction/load")
+				}
+				h.auth.credentialDirty = true
+				if h.Close() {
+					t.Error("read-only close failed")
+				}
+				if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+					t.Error("source tree changed during close")
+				}
+				if h.capabilities.credentialEncrypt.Load() != 0 {
+					t.Error("read-only close persisted credentials")
+				}
+			})
+		}
+	}
+}
+
+func TestProtocolE2EAuthSetupGatesBeforeSourceAccess(t *testing.T) {
+	for _, test := range []struct {
+		name, gate, refresh string
+		allow               bool
+		want                error
+	}{
+		{"disabled", "0", "1", false, errProtocolE2EDisabled},
+		{"disabled-refresh", "0", "1", true, errProtocolE2EDisabled},
+		{"refresh-not-authorized", "1", "0", true, errProtocolE2ERefreshDisabled},
+		{"refresh-not-exact", "1", "true", true, errProtocolE2ERefreshDisabled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := protocolE2ESyntheticAuthStore(t, "global", false)
+			before := protocolE2ESnapshotTree(t, source)
+			nonGateLookups := 0
+			lookup := func(key string) (string, bool) {
+				switch key {
+				case "QODER2API_E2E":
+					return test.gate, true
+				case "QODER2API_E2E_REFRESH":
+					return test.refresh, true
+				default:
+					nonGateLookups++
+					if key == "QODER2API_E2E_AUTH_DIR" {
+						return source, true
+					}
+					return "", false
+				}
+			}
+			h, err := newProtocolE2EAuthHarness(t, context.Background(), test.allow, lookup)
+			if h != nil {
+				h.Close()
+			}
+			if !errors.Is(err, test.want) || h != nil || nonGateLookups != 0 {
+				t.Error("constructor did not enforce both opt-ins before configuration/source access")
+			}
+			if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+				t.Error("disabled constructor changed synthetic source")
+			}
+		})
+	}
+}
+
+func TestProtocolE2EAuthSetupRefreshUsesExplicitSyntheticSource(t *testing.T) {
+	source := protocolE2ESyntheticAuthStore(t, "cn", true)
+	h, err := newProtocolE2EAuthHarness(t, context.Background(), true, envLookup(map[string]string{"QODER2API_E2E": "1", "QODER2API_E2E_REFRESH": "1", "QODER2API_E2E_REGION": "cn", "QODER2API_E2E_AUTH_DIR": source}))
+	if err != nil {
+		t.Fatal("synthetic refresh-enabled setup failed", err)
+	}
+	if h.auth.authFile != filepath.Join(source, "user") || h.readOnlyAuth || h.refreshTransport == nil || h.refreshTransport.calls.Load() != 0 {
+		t.Error("refresh-enabled constructor did not use explicitly authorized synthetic source without requests")
+	}
+	if h.Close() {
+		t.Error("synthetic refresh-enabled close failed")
+	}
+}
+
+func TestProtocolE2ECatalogUsesSourceAndVersionPolicy(t *testing.T) {
+	for _, names := range [][]string{{"catalog-v7"}, {"catalog-v7", "catalog-v6"}, {"catalog-v6"}} {
+		t.Run(strings.Join(names, "+"), func(t *testing.T) {
+			sourceAuth := filepath.Join(t.TempDir(), ".auth", "user")
+			copyAuth := filepath.Join(t.TempDir(), ".auth", "user")
+			uid := "synthetic-catalog-user"
+			for _, authFile := range []string{sourceAuth, copyAuth} {
+				if err := os.MkdirAll(filepath.Join(modelsCacheRoot(authFile), uid), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range names {
+				if err := os.WriteFile(filepath.Join(modelsCacheRoot(sourceAuth), uid, name), []byte("source-"+name), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(modelsCacheRoot(copyAuth), uid, "catalog-v6"), []byte("wrong-copy-cache"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			before := protocolE2ESnapshotTree(t, filepath.Dir(filepath.Dir(sourceAuth)))
+			decryptor := &fakeModelCacheDecryptor{data: []byte(`{"chat":[{"key":"synthetic-source-model","display_name":"Synthetic"}]}`)}
+			counts := &protocolE2ECapabilityCounts{}
+			h := &protocolE2EHarness{sourceAuthFile: sourceAuth, auth: &authManager{authFile: copyAuth, ui: &userInfo{UID: uid}}, services: &protocolServices{modelCache: &protocolE2ECountingModelCacheDecryptor{inner: decryptor, counts: counts}}, capabilities: counts}
+			resolver := protocolE2ELoadCatalog(t, context.Background(), h)
+			if resolver.byKey["synthetic-source-model"] == nil || decryptor.calls != 1 || decryptor.input != "source-"+names[0] || decryptor.uid != uid || counts.modelCacheDecrypt.Load() != 1 {
+				t.Error("catalog did not use original source path and shared v7/v6 policy exactly once")
+			}
+			if !reflect.DeepEqual(protocolE2ESnapshotTree(t, filepath.Dir(filepath.Dir(sourceAuth))), before) {
+				t.Error("source catalog changed")
+			}
+		})
+	}
+}
+
+func TestProtocolE2EAuthCopyAllowlistAndPermissions(t *testing.T) {
+	source := protocolE2ESyntheticAuthStore(t, "global", true)
+	for _, name := range []string{".credential-transaction", ".credential-transaction.lock", "arbitrary-cache"} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte("excluded-synthetic-data"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(source, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("nonexistent", filepath.Join(source, "ignored-link")); err != nil {
+		t.Fatal(err)
+	}
+	before := protocolE2ESnapshotTree(t, source)
+	destination := t.TempDir()
+	if err := os.Chmod(destination, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := protocolE2ECopyAuthStore(source, destination); err != nil {
+		t.Fatal("synthetic copy failed", err)
+	}
+	copied := protocolE2ESnapshotTree(t, destination)
+	if len(copied) != 4 || copied["."].mode.Perm() != 0700 {
+		t.Fatal("copy contains non-allowlisted files or unsafe directory permissions")
+	}
+	for _, name := range []string{"user", "machine_id", authBindingName} {
+		info, ok := copied[name]
+		if !ok || !info.mode.IsRegular() || info.mode.Perm() != 0600 || info.data != before[name].data {
+			t.Error("copy did not preserve allowlisted bytes as 0600 regular files")
+		}
+		original, _ := os.Lstat(filepath.Join(source, name))
+		copyInfo, _ := os.Lstat(filepath.Join(destination, name))
+		if os.SameFile(original, copyInfo) {
+			t.Error("copy used a link instead of independent bytes")
+		}
+	}
+	if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+		t.Error("copy mutated source tree")
+	}
+	// A source transaction lock must not be acquired, copied, or waited on.
+	h, err := newProtocolE2EAuthHarness(t, context.Background(), false, envLookup(map[string]string{"QODER2API_E2E": "1", "QODER2API_E2E_AUTH_DIR": source}))
+	if err != nil {
+		t.Fatal("read-only setup inspected excluded transaction state", err)
+	}
+	if h.Close() {
+		t.Error("read-only close failed")
+	}
+	if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+		t.Error("setup changed source transaction state")
+	}
+}
+
+func TestProtocolE2EAuthCopyRejectsUnsafeAllowlistedFiles(t *testing.T) {
+	for _, name := range []string{"user", "machine_id", authBindingName} {
+		for _, kind := range []string{"missing", "directory", "symlink", "dangling-symlink", "unreadable"} {
+			t.Run(name+"/"+kind, func(t *testing.T) {
+				source := protocolE2ESyntheticAuthStore(t, "global", true)
+				path := filepath.Join(source, name)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				switch kind {
+				case "directory":
+					err = os.Mkdir(path, 0700)
+				case "symlink", "dangling-symlink":
+					target := filepath.Join(t.TempDir(), "synthetic-link-target")
+					if kind == "symlink" {
+						if err := os.WriteFile(target, data, 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					err = os.Symlink(target, path)
+				case "unreadable":
+					err = os.WriteFile(path, data, 0000)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Snapshot cannot read an intentionally unreadable file as an unprivileged user.
+				err = protocolE2ECopyAuthStore(source, t.TempDir())
+				if name == authBindingName && kind == "missing" {
+					if err != nil {
+						t.Error("optional missing binding was not allowed")
+					}
+				} else if err == nil {
+					t.Error("unsafe or missing required allowlisted file was accepted")
+				} else if strings.Contains(err.Error(), source) || strings.Contains(err.Error(), string(data)) {
+					t.Error("copy error disclosed source path or contents")
+				}
+			})
+		}
+	}
+}
+
+func TestProtocolE2EAuthSetupValidatesCopiedBinding(t *testing.T) {
+	for _, kind := range []string{"region-mismatch", "issuer-mismatch", "malformed", "empty"} {
+		t.Run(kind, func(t *testing.T) {
+			source := protocolE2ESyntheticAuthStore(t, "cn", true)
+			env := map[string]string{"QODER2API_E2E": "1", "QODER2API_E2E_AUTH_DIR": source, "QODER2API_E2E_REGION": "cn"}
+			switch kind {
+			case "region-mismatch":
+				env["QODER2API_E2E_REGION"] = "global"
+			case "issuer-mismatch":
+				env["QODER2API_E2E_OPENAPI_ENDPOINT"] = "https://issuer-override.invalid"
+			case "malformed", "empty":
+				var data []byte
+				if kind == "malformed" {
+					data = []byte("synthetic-invalid-binding-secret")
+				}
+				if err := os.WriteFile(filepath.Join(source, authBindingName), data, 0640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := protocolE2ESnapshotTree(t, source)
+			h, err := newProtocolE2EAuthHarness(t, context.Background(), false, envLookup(env))
+			if h != nil {
+				h.Close()
+			}
+			if err == nil || h != nil {
+				t.Error("invalid copied binding bypassed persistent-manager validation")
+			} else if strings.Contains(err.Error(), source) || strings.Contains(err.Error(), "secret") {
+				t.Error("binding failure exposed source path or contents")
+			}
+			if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+				t.Error("failed setup mutated source binding/store")
+			}
+		})
+	}
+}
+
+type protocolE2ECleanupContext struct {
+	protocolContext
+	onClose func()
+}
+
+func (c *protocolE2ECleanupContext) Close() error {
+	c.onClose()
+	return c.protocolContext.Close()
+}
+
+func TestProtocolE2EAuthSetupClosesBeforeCopyCleanup(t *testing.T) {
+	source := protocolE2ESyntheticAuthStore(t, "global", true)
+	before := protocolE2ESnapshotTree(t, source)
+	var copyDir string
+	closed := 0
+	var h *protocolE2EHarness
+	t.Run("synthetic-cleanup", func(t *testing.T) {
+		var err error
+		h, err = newProtocolE2EAuthHarness(t, context.Background(), false, envLookup(map[string]string{"QODER2API_E2E": "1", "QODER2API_E2E_AUTH_DIR": source}))
+		if err != nil {
+			t.Fatal("synthetic setup failed", err)
+		}
+		copyDir = filepath.Dir(h.auth.authFile)
+		h.auth.protoCtx = &protocolE2ECleanupContext{protocolContext: h.auth.protoCtx, onClose: func() {
+			closed++
+			if _, err := os.Stat(copyDir); err != nil {
+				t.Error("temporary auth copy was removed before auth context close")
+			}
+		}}
+		h.auth.credentialDirty = true
+	})
+	if closed != 1 || h == nil || !h.auth.closed || h.capabilities.credentialEncrypt.Load() != 0 {
+		t.Fatal("harness cleanup did not close read-only auth exactly once")
+	}
+	if _, err := os.Stat(copyDir); !errors.Is(err, os.ErrNotExist) {
+		t.Error("private auth copy was not removed after close")
+	}
+	if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+		t.Error("cleanup changed source store")
+	}
+}
+
+func TestProtocolE2EAuthSetupHonorsSetupContext(t *testing.T) {
+	source := protocolE2ESyntheticAuthStore(t, "global", true)
+	before := protocolE2ESnapshotTree(t, source)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h, err := newProtocolE2EAuthHarness(t, ctx, false, envLookup(map[string]string{"QODER2API_E2E": "1", "QODER2API_E2E_AUTH_DIR": source}))
+	if h != nil {
+		h.Close()
+	}
+	if h != nil || err == nil {
+		t.Error("setup ignored canceled constructor context")
+	}
+	if !reflect.DeepEqual(protocolE2ESnapshotTree(t, source), before) {
+		t.Error("canceled setup changed source store")
+	}
+}
+
+func protocolE2EEnvironmentConfig(lookupEnv func(string) (string, bool)) (protocolE2EConfig, error) {
+	cfg := appConfig{
+		region:          lookupEnvOr(lookupEnv, "QODER2API_E2E_REGION", "global"),
+		authDir:         strings.TrimSpace(lookupEnvOr(lookupEnv, "QODER2API_E2E_AUTH_DIR", "")),
+		inferEndpoint:   lookupEnvOr(lookupEnv, "QODER2API_E2E_INFER_ENDPOINT", ""),
+		openapiEndpoint: lookupEnvOr(lookupEnv, "QODER2API_E2E_OPENAPI_ENDPOINT", ""),
+		webEndpoint:     lookupEnvOr(lookupEnv, "QODER2API_E2E_WEB_ENDPOINT", ""),
+	}
+	// Resolve only the explicitly selected E2E profile, never general app/PAT
+	// discovery or an unrelated region selector.
+	if err := cfg.resolveProfile(lookupEnv); err != nil {
+		return protocolE2EConfig{}, err
+	}
+	return protocolE2EConfig{region: cfg.region, authDir: cfg.authDir, inferEndpoint: cfg.inferEndpoint, openapiEndpoint: cfg.openapiEndpoint, webEndpoint: cfg.webEndpoint}, nil
 }
 
 func protocolE2ECloneDefaultTransport() (http.RoundTripper, func()) {
@@ -945,14 +1417,40 @@ func protocolE2ECloneDefaultTransport() (http.RoundTripper, func()) {
 	return http.DefaultTransport, func() {}
 }
 
-func protocolE2ERequireLocalAuth(t *testing.T, authDir string) {
-	t.Helper()
-	for _, name := range []string{"machine_id", "user"} {
-		info, err := os.Stat(filepath.Join(authDir, name))
-		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-			t.Skip("authorized encrypted local credential prerequisite unavailable")
+// Copy bytes, never links, and never transaction markers, locks, or unrelated
+// files. readAuthFile rejects symlinks/nonregular files and checks read identity.
+// Errors deliberately omit source paths and credential/binding contents.
+func protocolE2ECopyAuthStore(source, destination string) error {
+	if _, err := checkedDirectory(source); err != nil {
+		return errProtocolE2EAuthPrerequisite
+	}
+	if _, err := checkedDirectory(destination); err != nil {
+		return errors.New("auth-copy-directory")
+	}
+	if err := os.Chmod(destination, 0700); err != nil {
+		return errors.New("auth-copy-directory")
+	}
+	for _, name := range []string{"user", "machine_id", authBindingName} {
+		data, revision, err := readAuthFile(filepath.Join(source, name))
+		if err != nil {
+			return errProtocolE2EAuthPrerequisite
+		}
+		if name == authBindingName && !revision.exists {
+			continue
+		}
+		if !revision.exists || (name != authBindingName && len(data) == 0) {
+			return errProtocolE2EAuthPrerequisite
+		}
+		file, err := os.OpenFile(filepath.Join(destination, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return errors.New("auth-copy-file")
+		}
+		_, writeErr := file.Write(data)
+		if err := errors.Join(writeErr, file.Close()); err != nil {
+			return errors.New("auth-copy-file")
 		}
 	}
+	return nil
 }
 
 func protocolE2EFatal(t *testing.T, category string) {
@@ -960,70 +1458,97 @@ func protocolE2EFatal(t *testing.T, category string) {
 	t.Fatalf("protocol E2E setup failed: status=0 category=%s length=0", category)
 }
 
-func newProtocolE2EHarness(t *testing.T, allowRefresh bool) *protocolE2EHarness {
+var (
+	errProtocolE2EDisabled         = errors.New("authorized protocol E2E disabled; set QODER2API_E2E=1")
+	errProtocolE2ERefreshDisabled  = errors.New("authorized refresh E2E disabled; set QODER2API_E2E_REFRESH=1")
+	errProtocolE2EAuthPrerequisite = errors.New("authorized encrypted local credential prerequisite unavailable")
+)
+
+// The setup seam accepts an isolated environment so synthetic tests never enable
+// the process-wide live E2E gate. It performs no inference or refresh requests.
+func newProtocolE2EAuthHarness(t *testing.T, setupCtx context.Context, allowRefresh bool, lookupEnv func(string) (string, bool)) (*protocolE2EHarness, error) {
 	t.Helper()
-	requireProtocolE2E(t)
-	config := protocolE2EEnvironmentConfig()
-	protocolE2ERequireLocalAuth(t, config.authDir)
-
-	setupCtx, cancel := context.WithTimeout(context.Background(), protocolE2ESetupTimeout)
-	defer cancel()
-
-	capabilities := &protocolE2ECapabilityCounts{}
+	if lookupEnvOr(lookupEnv, "QODER2API_E2E", "") != "1" {
+		return nil, errProtocolE2EDisabled
+	}
+	if allowRefresh && lookupEnvOr(lookupEnv, "QODER2API_E2E_REFRESH", "") != "1" {
+		return nil, errProtocolE2ERefreshDisabled
+	}
+	config, err := protocolE2EEnvironmentConfig(lookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	authDir := config.authDir
+	if allowRefresh {
+		for _, name := range []string{"machine_id", "user"} {
+			data, revision, err := readAuthFile(filepath.Join(authDir, name))
+			if err != nil || !revision.exists || len(data) == 0 {
+				return nil, errProtocolE2EAuthPrerequisite
+			}
+		}
+	} else {
+		// Register TempDir cleanup first: the later harness Close callback must
+		// run before its persistent copy disappears (testing cleanup is LIFO).
+		authDir = t.TempDir()
+		if err := protocolE2ECopyAuthStore(config.authDir, authDir); err != nil {
+			return nil, err
+		}
+	}
 	services, err := newProtocolServices(productionProtocolHostDeps())
 	if err != nil || services == nil {
-		protocolE2EFatal(t, "protocol-services")
+		return nil, errors.New("protocol-services")
 	}
-
 	harness := &protocolE2EHarness{
-		services:     services,
-		capabilities: capabilities,
-		readOnlyAuth: !allowRefresh,
+		services:       services,
+		capabilities:   &protocolE2ECapabilityCounts{},
+		readOnlyAuth:   !allowRefresh,
+		sourceAuthFile: filepath.Join(config.authDir, "user"),
 	}
-	t.Cleanup(func() {
-		harness.Close()
-	})
+	t.Cleanup(func() { harness.Close() })
 	harness.installCapabilityCounters()
-
-	auth, err := newAuthManager(
-		services,
-		config.authDir,
-		config.openapiEndpoint,
-		config.inferEndpoint,
-		config.webEndpoint,
-		func(string, ...any) {},
-	)
+	auth, err := newAuthManagerWithOptions(services, authDir, config.openapiEndpoint, config.inferEndpoint, config.webEndpoint, func(string, ...any) {}, authManagerOptions{ctx: setupCtx, region: config.region})
 	if err != nil || auth == nil {
-		protocolE2EFatal(t, "auth-construction")
+		return nil, errors.New("auth-construction")
 	}
 	harness.auth = auth
+	// Install the transport immediately after construction, before load can
+	// invoke any auth capability. Read-only mode must never reach auth HTTP.
+	if allowRefresh {
+		baseTransport, closeIdle := protocolE2ECloneDefaultTransport()
+		harness.refreshTransport = &protocolE2ECountingTransport{base: baseTransport}
+		harness.closeIdle = append(harness.closeIdle, closeIdle)
+		auth.httpc = &http.Client{Transport: harness.refreshTransport, Timeout: protocolE2ERefreshTimeout, CheckRedirect: protocolHarnessRejectRedirect}
+	} else {
+		harness.denyRefresh = &protocolHarnessDenyTransport{}
+		auth.httpc = &http.Client{Transport: harness.denyRefresh, Timeout: protocolE2ERefreshTimeout, CheckRedirect: protocolHarnessRejectRedirect}
+	}
 	if err := auth.load(setupCtx); err != nil {
-		protocolE2EFatal(t, "credential-load")
+		return nil, errors.New("credential-load")
 	}
 	clearAuthManagerDirtyForHarness(auth)
+	return harness, nil
+}
+
+func newProtocolE2EHarness(t *testing.T, allowRefresh bool) *protocolE2EHarness {
+	t.Helper()
+	setupCtx, cancel := context.WithTimeout(context.Background(), protocolE2ESetupTimeout)
+	defer cancel()
+	harness, err := newProtocolE2EAuthHarness(t, setupCtx, allowRefresh, os.LookupEnv)
+	if errors.Is(err, errProtocolE2EDisabled) || errors.Is(err, errProtocolE2ERefreshDisabled) || errors.Is(err, errProtocolE2EAuthPrerequisite) {
+		t.Skip(err.Error())
+	}
+	if err != nil {
+		protocolE2EFatal(t, "auth-setup")
+	}
+	auth, services := harness.auth, harness.services
 	if harness.capabilities.credentialDecrypt.Load() == 0 {
 		t.Skip("authorized encrypted local credential prerequisite unavailable")
 	}
 	if !protocolE2EHasUsableToken(auth) {
 		t.Skip("authorized local token prerequisite unavailable")
 	}
-	if allowRefresh {
-		baseTransport, closeIdle := protocolE2ECloneDefaultTransport()
-		harness.refreshTransport = &protocolE2ECountingTransport{base: baseTransport}
-		harness.closeIdle = append(harness.closeIdle, closeIdle)
-		auth.httpc = &http.Client{
-			Transport:     harness.refreshTransport,
-			Timeout:       protocolE2ERefreshTimeout,
-			CheckRedirect: protocolHarnessRejectRedirect,
-		}
-	} else {
+	if !allowRefresh {
 		protocolE2ERequireFreshCredential(t, auth)
-		harness.denyRefresh = &protocolHarnessDenyTransport{}
-		auth.httpc = &http.Client{
-			Transport:     harness.denyRefresh,
-			Timeout:       protocolE2ERefreshTimeout,
-			CheckRedirect: protocolHarnessRejectRedirect,
-		}
 	}
 
 	input := protocolE2ERuntimeInput(auth)
@@ -1111,13 +1636,13 @@ func protocolE2ERuntimeInput(auth *authManager) runtimeFieldInput {
 
 func protocolE2ELoadCatalog(t *testing.T, ctx context.Context, harness *protocolE2EHarness) *modelResolver {
 	t.Helper()
-	if harness == nil || harness.auth == nil || harness.services == nil {
+	if harness == nil || harness.auth == nil || harness.services == nil || harness.sourceAuthFile == "" {
 		protocolE2EFatal(t, "catalog-harness")
 	}
 	auth := harness.auth
 	services := harness.services
+	authFile := harness.sourceAuthFile
 	auth.mu.Lock()
-	authFile := auth.authFile
 	uid := ""
 	if auth.ui != nil {
 		uid = auth.ui.UID
@@ -1125,11 +1650,6 @@ func protocolE2ELoadCatalog(t *testing.T, ctx context.Context, harness *protocol
 	auth.mu.Unlock()
 	if uid == "" {
 		t.Skip("authorized catalog UID prerequisite unavailable")
-	}
-	cachePath := filepath.Clean(filepath.Join(filepath.Dir(authFile), "..", ".models", uid, "catalog-v6"))
-	info, err := os.Stat(cachePath)
-	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		t.Skip("authorized encrypted local catalog prerequisite unavailable")
 	}
 	if services.modelCache == nil || harness.capabilities == nil {
 		protocolE2EFatal(t, "catalog-decryptor")
@@ -1142,6 +1662,9 @@ func protocolE2ELoadCatalog(t *testing.T, ctx context.Context, harness *protocol
 		}
 	})
 	afterDecrypt := harness.capabilities.modelCacheDecrypt.Load()
+	if afterDecrypt == beforeDecrypt {
+		t.Skip("authorized encrypted local catalog prerequisite unavailable")
+	}
 	if !merged || !protocolHarnessCapabilityCallAdvanced(beforeDecrypt, afterDecrypt) {
 		protocolE2EFatal(t, "catalog-decrypt-or-schema")
 	}

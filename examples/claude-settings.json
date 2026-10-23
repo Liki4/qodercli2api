@@ -2,9 +2,7 @@
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8377",
     "ANTHROPIC_AUTH_TOKEN": "sk-your-secret",
-    "ANTHROPIC_MODEL": "Auto",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "DISABLE_UPDATES": "1"
+    "ANTHROPIC_MODEL": "Auto"
   },
   "model": "Auto"
 }

@@ -1,6 +1,6 @@
-# qodercli v1.1.34 模型推理协议
+# qodercli v1.1.74 模型推理协议
 
-> 当前生产实现是 pure Go native-only；`testdata/protocol/1.1.34/` 的全合成 frozen fixtures 固定互操作基线。历史 characterization 使用的 Qoder CLI v1.1.34 authentication WASM 为 297,238 bytes、SHA-256 `b3ddd7c9235cea51a965582506fa6281bb298ddab782ff3edb3f9015da2468d4`，现在仅可由运维方作为外部 oracle 提供。
+> 生产保持 pure Go native-only。`testdata/protocol/1.1.74/` 独立固定当前核心协议，`1.1.34/` 保留历史向量。两版外置 oracle 的固定身份与验证命令见 [工具说明](../tools/README.md)，样本与静态证据见 [1.1.74 分析](qodercli-1.1.74-analysis.md)。本文区分核心 prepared request 与官方 JS 外层的最终发送规则；原始 22/18-header 向量不是最终网络请求头的完整清单。
 
 ## 1. URL
 
@@ -9,7 +9,7 @@ POST {inference_endpoint}/algo/api/v2/service/pro/sse/agent_chat_generation
     ?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1
 ```
 
-默认 endpoint 为 `https://api2.qoder.sh`，可由运维配置覆盖。`AgentId=agent_common` 是 URL 构造的固定常量，**不读取 body 的 `agent_id`**；修改、删除或重排 body 字段不会改变该 query 值。
+global 默认 endpoint 为 `https://api2.qoder.sh`，cn 为 `https://gateway.qoder.com.cn`，可由可信运维配置覆盖。`AgentId=agent_common` 是 URL 构造的固定常量，**不读取 body 的 `agent_id`**；修改、删除或重排 body 字段不会改变该 query 值。
 
 COSY 签名使用的 path 固定为：
 
@@ -19,9 +19,9 @@ COSY 签名使用的 path 固定为：
 
 它不包含 endpoint 的 `/algo` 前缀，也不包含 query string。
 
-## 2. 最多 22 个请求头及条件 presence
+## 2. 核心输出：最多 22 个请求头及条件 presence
 
-normal-user 完整输入（非空 organization ID、至少一个 organization tag、非空 model key）准备后的 header map 精确包含 22 项。pinned WASM 的 header presence 是条件式的，native 实现逐项匹配该行为：
+normal-user 完整输入（非空 organization ID、至少一个 organization tag、非空 model key）的**原始 prepared header map** 精确包含 22 项。1.1.34/1.1.74 pinned WASM 的核心 presence 一致，native 实现逐项匹配。1.1.74 官方 JS 随后会改写机器 token/type 头，不能把下表直接当作最终发送头；外层差异的静态证据见 [分析记录 §4](qodercli-1.1.74-analysis.md#4-原生核心与最终发送请求必须分层验证)。
 
 | Header | 值/条件 |
 |---|---|
@@ -43,7 +43,7 @@ normal-user 完整输入（非空 organization ID、至少一个 organization ta
 | `Cosy-Organization-Tags` | tags 按原顺序以逗号连接；仅当 slice 长度大于零时存在 |
 | `Cosy-Scene` | scene，默认 `assistant` |
 | `Cosy-User` | uid |
-| `Cosy-Version` | `1.1.34` |
+| `Cosy-Version` | context version，当前生产为 `1.1.74`；历史向量仍为 `1.1.34` |
 | `Login-Version` | `v2` |
 | `X-Model-Key` | `PrepareInferRequest` 的 model key；仅当 model key 非空时存在 |
 | `X-Model-Source` | model source，通常 `system` 或 `custom`；与 `X-Model-Key` 同门控，key 非空时即使 source 为空也保留空值 header |
@@ -60,6 +60,12 @@ presence matrix 已由独立 WASM characterization 和 native/WASM differential 
 | model key 非空、model source 空 | 不减少 | `X-Model-Source` 存在，值为空 |
 
 `organization_tags=null` 与空 slice 在低层 context API 中不等价：pinned WASM 在 context New 阶段、任何 host entropy/clock 调用之前拒绝 nil tags；native factory 同样 fail closed。auth semantic boundary 会把登录/userinfo/load 得到的 nil tags 克隆为非 nil 空 slice，再生成 runtime fields 与 context config；它不放宽直接调用 factory 时的精确校验。非 nil 空 slice 是有效输入，并触发上表的 tags header omission。
+
+### 2.1 代理的最终发送层
+
+代理在克隆核心 prepared header map 后，按 1.1.74 的无 UMID 分支，不区分大小写移除所有 `Cosy-MachineToken` / `Cosy-MachineType` 键，保留 `Cosy-MachineId`。随后仅在键缺失时补充 `Cosy-Version`、`Cosy-ClientType`、`Cosy-MachineOS`；已有值（包括显式空值、多值和非规范大小写）不被覆盖。body、URL、Authorization/signature 和原始 prepared map 不被改写。
+
+同一公共标识默认值也用于 OpenAPI 认证请求，但机器 token/type 清理仅用于推理。Linux/amd64 的 MachineOS 是已与样本核对的 `x86_64_linux`；其他平台使用标准架构/OS 名称映射，不声称已经逐个平台比对官方发行样本。本项目不主动采集 hostname、UMID 或硬件标识，也不注入遥测 trace 字段。
 
 ## 3. COSY Authorization
 
@@ -83,7 +89,7 @@ payload 是以下 **固定字段顺序**的 raw JSON：
 {"version":"v1","requestId":"<uuid>","info":"<encrypt_user_info>","cosyVersion":"<context version>","ideVersion":""}
 ```
 
-pinned 正常 context 的 version 为 `1.1.34`，因此 official fixture 的 payload 仍逐字节包含 `"cosyVersion":"1.1.34"`。version perturbation characterization 证明该字段读取 context version，而不是另一个独立常量；`Cosy-Version` header 与 payload 同步变化并影响签名。
+每个版本的 fixture 使用自身固定的 context version：历史目录仍包含 `"cosyVersion":"1.1.34"`，新目录及当前生产使用 `1.1.74`。version perturbation characterization 证明该字段读取 context version，而不是另一个独立常量；`Cosy-Version` header 与 payload 同步变化并影响签名。升级生产常量不会重写历史向量。
 
 对这串 raw UTF-8 bytes 使用 **standard padded Base64**；保留标准 `+/` 字母表和 `=` padding，不使用 base64url。
 
@@ -126,7 +132,7 @@ _doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!
 3. 将标准 Base64 padding `=` 映射为 `$`。
 4. 对映射后的字符串做 outer-third swap：令 `k=floor(len/3)`，`A=s[:k]`、`B=s[k:len-k]`、`C=s[len-k:]`，输出 `C || B || A`。中段吸收不能整除 3 的余数。
 
-逆变换为同样交换外侧 thirds，再把 `$` 和 custom alphabet 映回标准 Base64 后严格解码。该 body 是可逆的确定性编码，**不是加密**，也不需要每次调用 WASM 才能计算。native implementation 与 pinned adapter 对该 codec 保持 byte-exact 兼容。
+逆变换为同样交换外侧 thirds，再把 `$` 和 custom alphabet 映回标准 Base64 后严格解码。该 body 是可逆的确定性编码，**不是加密**，也不需要每次调用 WASM 才能计算。native 与两版 pinned oracle 在有效编码域上保持 byte-exact 兼容；native 有意拒绝六种 oracle 容忍的非规范 padding/换行输入。具名差异及 33-case corpus 见 [版本分析](qodercli-1.1.74-analysis.md#4-原生核心与最终发送请求必须分层验证)，不放宽生产校验。
 
 ## 5. RemoteChatAsk raw JSON
 
@@ -144,14 +150,18 @@ agent_id, aliyun_user_type, business, chat_context, chat_record_id, chat_task, c
 
 ## 6. model cache：QMC v1
 
-`~/.qoder/.models/{uid}/catalog-v6` 使用 QMC v1 envelope：
+1.1.74 使用所选配置根下的 `.models/{uid}/catalog-v7`（global 默认 `~/.qoder`，CN 默认 `~/.qoder-cn`）。旧 `catalog-v6` 仅作为 v7 不存在时的兼容来源。缓存文件代数变化不等于加密 envelope 变化，两者仍使用 QMC v1：
 
 1. HKDF-SHA256 的 IKM 为 raw `UTF8(uid)`；salt 为 ASCII `qoder-model-cache-enc`（21 bytes）；info 为 ASCII `model-cache-v1`（14 bytes）；输出精确为 32 bytes，作为 AES-256 key。
 2. 使用随机 nonce 12 bytes、authentication tag 16 bytes、**empty AAD** 的 AES-256-GCM 加密 catalog plaintext。
 3. 二进制 envelope 精确为 `QMC\x01 || nonce(12) || ciphertext || tag(16)`。
 4. 整个 envelope 使用 standard padded Base64 保存。
 
-解密必须校验 magic、version、最小长度和 GCM tag，任何失败均 fail closed。目录加载通过语义解密边界处理 QMC v1；未知 magic/version 等不兼容输入不会被误当作可降级数据，catalog loader 会保留 built-in catalog。
+解密必须校验 magic、version、最小长度和 GCM tag，任何失败均 fail closed。显式 `-catalog` 明文文件优先；自动加载只有在 v7 文件不存在时才读 v6。v7 读取、解密或结构错误会输出内容静默诊断并保留内置兜底，不借旧 v6 掩盖，也不删除或改写官方缓存。
+
+仅解析 `chat`、`byok_enterprise`、`byok_teams` 三个已支持组；不会把 embedding、service-account 等未知场景混入 Chat API 清单。`key`/`model_key`、`display_name`/`name` 使用缺失或 null 才回退的规则，显式空字符串不触发别名。`enable` 缺失/null 默认启用，false 或数值 0 保留为禁用；禁用条目仍在内部解析清单中，避免被合成为启用条目，但不出现在 `/v1/models`。
+
+至少要有一个真实的受支持数组才是合法目录结构；`[]` 有效，`null` 组不算数组。坏邻居组/条目不会丢弃其他有效条目。chat 同组后出现的键优先，非 chat 组不覆盖已有受支持组条目；模型映射、friendly ID 和 `[1m]` 机制保持原有语义。内置项仍是无可用缓存时的兼容兜底，不是实时账号授权列表。
 
 ## 7. response：明文 SSE
 
@@ -161,14 +171,14 @@ agent_id, aliyun_user_type, business, chat_context, chat_record_id, chat_task, c
 data:{"headers":{"Content-Type":["application/json"]},"body":"<inner JSON string>","statusCodeValue":200,"statusCode":"OK"}
 ```
 
-`body` 通常再解析一次得到 OpenAI `chat.completion.chunk`，可含 `content`、`reasoning_content`、流式 `tool_calls`、`finish_reason` 和 `usage`。授权 E2E 还确认：一个有效的 `statusCodeValue:200` 外层信封可在 `body` 字符串中携带精确的 `[DONE]` 标记；该标记本身不是上游终止依据。之后仍由独立的权威终止事件收尾：
+`body` 通常再解析一次得到 OpenAI `chat.completion.chunk`，可含 `content`、`reasoning_content`、流式 `tool_calls`、`finish_reason` 和 `usage`。历史 1.1.34 授权 E2E 曾确认（1.1.74 尚未进行线上验收）：一个有效的 `statusCodeValue:200` 外层信封可在 `body` 字符串中携带精确的 `[DONE]` 标记；该标记本身不是上游终止依据。之后仍由独立的权威终止事件收尾：
 
 ```text
 event:finish
 data:{"firstTokenDuration":...,"totalDuration":...,"serverDuration":...}
 ```
 
-因此，上游的 `[DONE]` 位于外层信封的 `body` 内，不是裸 `data:[DONE]` 帧；代理仅忽略这个精确标记，并继续要求后续 `event:finish`。面向不同下游客户端时，代理仍按目标协议生成各自的终止帧。`statusCodeValue != 200` 是错误信封；代理将其转换为各客户端协议的错误事件。
+因此，上游的 `[DONE]` 位于外层信封的 `body` 内，不是裸 `data:[DONE]` 帧；代理忽略这个精确标记，协议以 `event:finish` 为权威终止信号。需要区分协议与实现：当前生产 `readSSE` 也允许 EOF 结束读取，并未新增“缺少 finish 一律拒绝”的严格检查；测试观察器的终止形状验证更严格。面向不同下游客户端时，代理按目标协议生成终止帧。`statusCodeValue != 200` 是错误信封，会转换为各客户端协议的错误事件。
 
 ## 8. 当前 proxy retry 算法
 
@@ -188,7 +198,7 @@ code 103 duplicate 的准确含义：当前 proxy retry 会保留同一 RemoteCh
 
 ## 9. Native-only production 与验证边界
 
-Production 只有一个 native service constructor；没有 backend mode flag、环境变量、WASM adapter、shadow wrapper 或 fallback runtime。root module 和 production binary 不包含 WASM bytes，也不依赖 wazero。验证状态和授权运行命令见 [README §7.1](../README.md#71-native-only-验证)。
+Production 只有一个 native service constructor；没有 backend mode flag、环境变量、WASM adapter、shadow wrapper 或 fallback runtime。root module 和 production binary 不包含 WASM bytes，也不依赖 wazero。验证状态和授权运行命令见 [开发指南](development.md#authorized-e2e)。
 
 native context 的当前语义如下：
 
@@ -198,6 +208,8 @@ native context 的当前语义如下：
 - context 本身不保存 transcript 或隐藏计数器。每次 Prepare 获得独立的不可变状态副本和 body 副本，返回的 header map、header value slices 与 body 也拥有独立 storage。生产 wall clock 与 secure entropy 实现可并发使用；record/replay machinery 仅存在于测试文件。
 - Close 幂等并等待在途 Prepare；关闭开始后不再接纳新 Prepare。该本地 context 边界不执行 auth refresh 或网络请求。
 
-普通 root 测试使用 frozen fixtures 和 native deterministic replay，不需要 Python、外部 WASM 或网络。离线证据包括：`infer-user.json` 的完整 22-header byte-for-byte match、`infer-user-no-org.json` 的 caller-field ownership 与 18-header match、15 个 pinned lowercase signature vectors、header presence matrix、覆盖 body/model/organization/policy/time/endpoint 变化的 deterministic corpus、native retry regeneration、race/fuzz/stress 和跨平台构建。external oracle 会按 `credential`、`runtime`、`model-cache`、`infer`、`infer-no-org` 顺序复核五个文档。
+普通 root 测试使用版本化 frozen fixtures 和 native deterministic replay，不需要 Python、外部 WASM 或网络。两版分别核验 `infer-user.json` 的原始 22-header、`infer-user-no-org.json` 的 caller ownership 与原始 18-header，以及 credential/runtime/model-cache；历史 signature/presence/transcript 测试继续保留。1.1.74 另有 33-case compatibility corpus，七项 strict-native 拒绝被精确列出。external oracle 验证与独立 capture 命令见 [工具说明](../tools/README.md)。
+
+历史 1.1.34 的 race/fuzz/stress、跨平台构建与真实账号 E2E 结果不能作为 1.1.74 的线上验收。1.1.74 的证据来自静态分析和合成离线验证，尚未执行真实 global/CN 账号登录、刷新或推理验收。当前检查命令和证据范围见 [开发指南](development.md#verification-scope)，历史性能数据仍保留在 [BENCHMARK.md](../BENCHMARK.md)，不重新标注为当前性能。
 
 可选 external oracle 位于 `tools/wasm_oracle` 独立子模块中，保留其自己的 wazero 依赖。它只接受运维方显式提供且身份匹配的授权 WASM，并以内容静默方式复核 synthetic frozen fixtures；它不属于 production dependency graph。

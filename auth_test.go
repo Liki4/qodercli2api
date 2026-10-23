@@ -21,6 +21,45 @@ import (
 	"time"
 )
 
+func TestUserInfoPreservesUnknownJSONAndCloneIsolation(t *testing.T) {
+	input := []byte(`{"uid":"old","organization_tags":["original"],"future":{"large":900719925474099312345,"nested":[null,{"x":true}]},"future_null":null}`)
+	var ui userInfo
+	if err := json.Unmarshal(input, &ui); err != nil {
+		t.Fatal(err)
+	}
+	clone := cloneUserInfo(&ui)
+	clone.UID = "new"
+	clone.OrgTags[0] = "changed"
+	encoded, err := json.Marshal(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["future"]) != `{"large":900719925474099312345,"nested":[null,{"x":true}]}` || string(fields["future_null"]) != "null" {
+		t.Fatalf("unknown JSON lost: %s", encoded)
+	}
+	if string(fields["uid"]) != `"new"` || ui.UID != "old" || ui.OrgTags[0] != "original" {
+		t.Fatal("typed fields or clone isolation incorrect")
+	}
+	clone.extra["future"][0] = '['
+	clone.extra["future_null"] = []byte(`true`)
+	if ui.extra["future"][0] != '{' || string(ui.extra["future_null"]) != "null" {
+		t.Fatal("extra map or byte slices alias original")
+	}
+	ui.extra["uid"] = []byte(`"untrusted"`)
+	ui.extra["name"] = []byte(`"should stay omitted"`)
+	encoded, err = json.Marshal(ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "untrusted") || strings.Contains(string(encoded), "should stay omitted") {
+		t.Fatal("extras override typed fields")
+	}
+}
+
 type fakeCredentialCodec struct {
 	mu sync.Mutex
 
@@ -339,7 +378,7 @@ func TestNewAuthManagerRejectsMissingProtocolCapabilities(t *testing.T) {
 }
 
 func TestAuthManagerLoggedInSynchronizesWithCredentialUpdates(t *testing.T) {
-	a := &authManager{ui: &userInfo{SecurityOAuthToken: "synthetic-token"}}
+	a := syntheticAuthManager(t, &authManager{ui: &userInfo{SecurityOAuthToken: "synthetic-token"}})
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -390,7 +429,7 @@ func TestAuthManagerRefreshReplacesContext(t *testing.T) {
 		factory := &fakeProtocolContextFactory{contexts: []protocolContext{newCtx}}
 		codec := &fakeCredentialCodec{encrypted: "synthetic-saved-credential"}
 		authFile := filepath.Join(t.TempDir(), "user")
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol: &protocolServices{credentials: codec, runtimeFields: generator, contextFactory: factory},
 			authFile: authFile, machineID: "0123456789abcdef-extra", openapiBase: server.URL,
 			httpc: server.Client(), protoCtx: old, logf: func(string, ...any) {},
@@ -399,7 +438,7 @@ func TestAuthManagerRefreshReplacesContext(t *testing.T) {
 				SecurityOAuthToken: "synthetic-old-token", AccessToken: "synthetic-old-token",
 				EncryptUserInfo: "old-encrypted-user", Key: "old-key",
 			},
-		}
+		})
 
 		if err := a.forceRefresh(context.Background()); err != nil {
 			t.Fatalf("forceRefresh() error = %v", err)
@@ -446,14 +485,14 @@ func TestAuthManagerRefreshReplacesContext(t *testing.T) {
 		}
 	})
 
-	t.Run("generator failure preserves old fields and still rebuilds", func(t *testing.T) {
+	t.Run("generator failure preserves active token-bound fields and refresh rotation", func(t *testing.T) {
 		server := newRefreshServer(t)
 		old := &fakeProtocolContext{}
 		newCtx := &fakeProtocolContext{}
 		generator := &fakeRuntimeFieldGenerator{err: errors.New("synthetic generator failure")}
 		factory := &fakeProtocolContextFactory{contexts: []protocolContext{newCtx}}
 		codec := &fakeCredentialCodec{encrypted: "synthetic-saved-credential"}
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol: &protocolServices{credentials: codec, runtimeFields: generator, contextFactory: factory},
 			authFile: filepath.Join(t.TempDir(), "user"), machineID: "synthetic-machine", openapiBase: server.URL,
 			httpc: server.Client(), protoCtx: old, logf: func(string, ...any) {},
@@ -462,26 +501,26 @@ func TestAuthManagerRefreshReplacesContext(t *testing.T) {
 				SecurityOAuthToken: "synthetic-old-token", AccessToken: "synthetic-old-token",
 				EncryptUserInfo: "old-encrypted-user", Key: "old-key",
 			},
-		}
+		})
 
-		if err := a.forceRefresh(context.Background()); err != nil {
-			t.Fatalf("forceRefresh() error = %v, want best-effort field fallback", err)
+		if err := a.forceRefresh(context.Background()); err == nil {
+			t.Fatal("forceRefresh() accepted new token with old token-bound fields")
 		}
 		a.mu.Lock()
 		gotToken := a.ui.SecurityOAuthToken
 		gotFields := runtimeFieldOutput{EncryptUserInfo: a.ui.EncryptUserInfo, Key: a.ui.Key}
 		a.mu.Unlock()
-		if gotToken != "synthetic-new-token" {
-			t.Fatalf("security token = %q, want refreshed token", gotToken)
+		if gotToken != "synthetic-old-token" || a.ui.RefreshToken != "synthetic-new-refresh" {
+			t.Fatal("active token or preserved refresh rotation is incorrect")
 		}
 		if gotFields != (runtimeFieldOutput{EncryptUserInfo: "old-encrypted-user", Key: "old-key"}) {
 			t.Fatalf("runtime fields = %#v, want preserved old fields", gotFields)
 		}
-		if len(factory.configs) != 1 || factory.configs[0].User.EncryptUserInfo != "old-encrypted-user" || factory.configs[0].User.Key != "old-key" {
-			t.Fatalf("fallback context configs = %#v", factory.configs)
+		if len(factory.configs) != 0 {
+			t.Fatal("failed runtime generation built a candidate context")
 		}
-		if closes, _ := old.state(); closes != 1 {
-			t.Fatalf("old context Close() count = %d, want 1", closes)
+		if closes, _ := old.state(); closes != 0 {
+			t.Fatalf("old context Close() count = %d, want 0", closes)
 		}
 	})
 
@@ -492,7 +531,7 @@ func TestAuthManagerRefreshReplacesContext(t *testing.T) {
 		factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
 		codec := &fakeCredentialCodec{}
 		authFile := filepath.Join(t.TempDir(), "user")
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol: &protocolServices{credentials: codec, runtimeFields: generator, contextFactory: factory},
 			authFile: authFile, machineID: "synthetic-machine", openapiBase: server.URL,
 			httpc: server.Client(), protoCtx: old, logf: func(string, ...any) {},
@@ -500,13 +539,13 @@ func TestAuthManagerRefreshReplacesContext(t *testing.T) {
 				UID: "synthetic-user", RefreshToken: "synthetic-old-refresh",
 				SecurityOAuthToken: "synthetic-old-token", AccessToken: "synthetic-old-token",
 			},
-		}
+		})
 
 		if err := a.forceRefresh(context.Background()); err == nil {
 			t.Fatal("forceRefresh() error = nil, want final runtime field generation failure")
 		}
-		if generator.calls != 2 {
-			t.Fatalf("runtime Generate() call count = %d, want best-effort attempt plus rebuild attempt", generator.calls)
+		if generator.calls != 1 {
+			t.Fatalf("runtime Generate() call count = %d, want one authoritative generation", generator.calls)
 		}
 		if len(factory.configs) != 0 {
 			t.Fatalf("context factory call count = %d, want 0 for incomplete fields", len(factory.configs))
@@ -563,7 +602,7 @@ func TestAuthManagerRefreshCandidateRetriesAfterContextBuildFailure(t *testing.T
 		contexts: []protocolContext{newCtx},
 	}
 	expiredAt := time.Now().Add(-2 * time.Hour).Unix()
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    &fakeCredentialCodec{encrypted: "synthetic-saved-credential"},
 			runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "candidate-fields", Key: "candidate-key"}},
@@ -586,7 +625,7 @@ func TestAuthManagerRefreshCandidateRetriesAfterContextBuildFailure(t *testing.T
 		},
 		protoCtx: old,
 		logf:     func(string, ...any) {},
-	}
+	})
 
 	if prepared, err := a.PrepareInferRequest(context.Background(), inferRequestInput{}); prepared != nil || protocolErrorKindOf(err) != protocolAuthUnavailable {
 		t.Fatalf("first PrepareInferRequest() = (%#v, %v), want context build failure wrapped as auth-unavailable", prepared, err)
@@ -674,7 +713,7 @@ func TestAuthManagerRefreshRotationPersistsAcrossRestartAfterContextBuildFailure
 	oldCtx := &fakeProtocolContext{prepared: &preparedRequest{URL: "https://old.example.test"}}
 	firstFactoryErr := errors.New("synthetic first context build failure")
 	firstCodec := &fakeCredentialCodec{}
-	first := &authManager{
+	first := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    firstCodec,
 			runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "candidate-fields-1", Key: "candidate-key-1"}},
@@ -697,7 +736,7 @@ func TestAuthManagerRefreshRotationPersistsAcrossRestartAfterContextBuildFailure
 		},
 		protoCtx: oldCtx,
 		logf:     func(string, ...any) {},
-	}
+	})
 	if prepared, err := first.PrepareInferRequest(context.Background(), inferRequestInput{}); prepared != nil || protocolErrorKindOf(err) != protocolAuthUnavailable {
 		t.Fatalf("first PrepareInferRequest() = (%#v, %v), want context build failure", prepared, err)
 	}
@@ -776,7 +815,7 @@ func TestAuthManagerRefreshRotationSaveFailurePreservesBothErrors(t *testing.T) 
 
 	contextErr := errors.New("synthetic context build failure")
 	saveErr := errors.New("synthetic credential persistence failure")
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    &fakeCredentialCodec{encryptErr: saveErr},
 			runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "candidate-fields", Key: "candidate-key"}},
@@ -797,7 +836,7 @@ func TestAuthManagerRefreshRotationSaveFailurePreservesBothErrors(t *testing.T) 
 		},
 		protoCtx: &fakeProtocolContext{},
 		logf:     func(string, ...any) {},
-	}
+	})
 
 	_, err := a.PrepareInferRequest(context.Background(), inferRequestInput{})
 	if err == nil {
@@ -847,7 +886,7 @@ func TestAuthManagerRefreshCommitUsesBoundedDetachedContext(t *testing.T) {
 		factory := &fakeProtocolContextFactory{contexts: []protocolContext{newCtx}, respectContext: true}
 		codec := &fakeCredentialCodec{respectContext: true}
 		authFile := filepath.Join(t.TempDir(), "user")
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol: &protocolServices{credentials: codec, runtimeFields: generator, contextFactory: factory},
 			authFile: authFile, machineID: "synthetic-machine", openapiBase: "https://refresh.example.test",
 			httpc: newCancelingClient(cancel, `{"device_token":"detached-token","refresh_token":"detached-refresh","expires_in":7200,"refresh_token_expires_in":14400}`),
@@ -862,7 +901,7 @@ func TestAuthManagerRefreshCommitUsesBoundedDetachedContext(t *testing.T) {
 			},
 			protoCtx: &fakeProtocolContext{},
 			logf:     func(string, ...any) {},
-		}
+		})
 
 		prepared, err := a.PrepareInferRequest(callerCtx, inferRequestInput{})
 		if err != nil {
@@ -899,7 +938,7 @@ func TestAuthManagerRefreshCommitUsesBoundedDetachedContext(t *testing.T) {
 		codec := &fakeCredentialCodec{respectContext: true}
 		authFile := filepath.Join(t.TempDir(), "user")
 		expiredAt := time.Now().Add(-time.Hour).Unix()
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol: &protocolServices{
 				credentials:    codec,
 				runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "candidate-fields", Key: "candidate-key"}, respectContext: true},
@@ -918,7 +957,7 @@ func TestAuthManagerRefreshCommitUsesBoundedDetachedContext(t *testing.T) {
 			},
 			protoCtx: &fakeProtocolContext{},
 			logf:     func(string, ...any) {},
-		}
+		})
 
 		_, err := a.PrepareInferRequest(callerCtx, inferRequestInput{})
 		if err == nil {
@@ -1070,7 +1109,7 @@ func TestAuthManagerRefreshPersistenceGetsFreshBudgetAfterBuildDeadline(t *testi
 		acceptedCtx := &fakeProtocolContext{prepared: &preparedRequest{URL: "https://deadline-success.example.test"}}
 		deadlineFactory := &deadlineConsumingContextFactory{next: acceptedCtx}
 		codec := &fakeCredentialCodec{respectContext: true}
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol: &protocolServices{
 				credentials:    codec,
 				runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "deadline-success-fields", Key: "deadline-success-key"}},
@@ -1087,7 +1126,7 @@ func TestAuthManagerRefreshPersistenceGetsFreshBudgetAfterBuildDeadline(t *testi
 				EncryptUserInfo:    "synthetic-old-fields",
 				Key:                "synthetic-old-key",
 			},
-		}
+		})
 
 		if err := a.forceRefresh(context.Background()); err != nil {
 			t.Fatalf("forceRefresh() error = %v (internal: %v)", err, protocolInternalError(err))
@@ -1123,7 +1162,7 @@ func TestAuthManagerDirtyCredentialPersistenceIsBestEffortAndRateLimited(t *test
 	saveErr := errors.New("synthetic credential persistence failure")
 	codec := &fakeCredentialCodec{encryptErr: saveErr}
 	var logs strings.Builder
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol:  &protocolServices{credentials: codec},
 		authFile:  filepath.Join(t.TempDir(), "user"),
 		machineID: "synthetic-machine",
@@ -1137,7 +1176,7 @@ func TestAuthManagerDirtyCredentialPersistenceIsBestEffortAndRateLimited(t *test
 		logf: func(format string, args ...any) {
 			fmt.Fprintf(&logs, format+"\n", args...)
 		},
-	}
+	})
 	t.Cleanup(func() { _ = manager.Close() })
 
 	prepared, err := manager.PrepareInferRequest(context.Background(), inferRequestInput{})
@@ -1319,7 +1358,7 @@ func TestAuthManagerPersistentDirtyCredentialFailureIsVisibleAndCloseReportsIt(t
 	codec := &fakeCredentialCodec{encryptErr: saveErr}
 	oldCtx := &fakeProtocolContext{}
 	acceptedCtx := &fakeProtocolContext{prepared: &preparedRequest{URL: "https://persistent.example.test"}}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    codec,
 			runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "persistent-fields", Key: "persistent-key"}},
@@ -1336,7 +1375,7 @@ func TestAuthManagerPersistentDirtyCredentialFailureIsVisibleAndCloseReportsIt(t
 			EncryptUserInfo:    "synthetic-old-fields",
 			Key:                "synthetic-old-key",
 		},
-	}
+	})
 
 	if err := a.forceRefresh(context.Background()); err != nil {
 		t.Fatalf("forceRefresh() error = %v, want accepted in-memory state", err)
@@ -1384,12 +1423,12 @@ func TestAuthManagerSaveWritesCredentialOnceAtomically(t *testing.T) {
 		dir := t.TempDir()
 		authFile := filepath.Join(dir, "nested", "user")
 		codec := &fakeCredentialCodec{encrypted: "synthetic-ciphertext"}
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol:  &protocolServices{credentials: codec},
 			authFile:  authFile,
 			machineID: "0123456789abcdef-extra",
 			ui:        &userInfo{UID: "synthetic-user", SecurityOAuthToken: "synthetic-token"},
-		}
+		})
 
 		if err := a.save(context.Background()); err != nil {
 			t.Fatalf("save() error = %v", err)
@@ -1423,12 +1462,12 @@ func TestAuthManagerSaveWritesCredentialOnceAtomically(t *testing.T) {
 		fixedTemp := authFile + ".tmp"
 		symlinkOrSkipWindows(t, victimPath, fixedTemp)
 		codec := &fakeCredentialCodec{encrypted: "synthetic-safe-ciphertext"}
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol:  &protocolServices{credentials: codec},
 			authFile:  authFile,
 			machineID: "synthetic-machine",
 			ui:        &userInfo{UID: "synthetic-user"},
-		}
+		})
 
 		if err := a.save(context.Background()); err != nil {
 			t.Fatalf("save() error = %v", err)
@@ -1469,26 +1508,41 @@ func TestAuthManagerSaveWritesCredentialOnceAtomically(t *testing.T) {
 			ciphertext := strings.Repeat(string(rune('A'+i)), 64*1024)
 			start := make(chan struct{})
 			codec := &fakeCredentialCodec{encrypted: ciphertext, encryptStarted: start, encryptRelease: release}
-			managers = append(managers, &authManager{
+			managers = append(managers, syntheticAuthManager(t, &authManager{
 				protocol:  &protocolServices{credentials: codec},
 				authFile:  authFile,
 				machineID: "synthetic-machine",
 				ui:        &userInfo{UID: "synthetic-user"},
-			})
+			}))
 			started = append(started, start)
 			ciphertexts = append(ciphertexts, ciphertext)
 		}
 		errs := make(chan error, writers)
-		for _, manager := range managers {
+		go func() { errs <- managers[0].save(context.Background()) }()
+		<-started[0]
+		for _, manager := range managers[1:] {
 			go func(a *authManager) { errs <- a.save(context.Background()) }(manager)
 		}
-		for _, start := range started {
-			<-start
-		}
 		close(release)
+		successes, conflicts := 0, 0
 		for i := 0; i < writers; i++ {
-			if err := <-errs; err != nil {
-				t.Fatalf("concurrent save %d error = %v", i, err)
+			err := <-errs
+			if err == nil {
+				successes++
+			} else if isAuthConflict(err) {
+				conflicts++
+			} else {
+				t.Fatalf("concurrent save error = %v", err)
+			}
+		}
+		if successes != 1 || conflicts != writers-1 {
+			t.Fatalf("serialized writes: successes=%d conflicts=%d", successes, conflicts)
+		}
+		for _, start := range started[1:] {
+			select {
+			case <-start:
+				t.Fatal("stale writer reached encryption")
+			default:
 			}
 		}
 		final, err := os.ReadFile(authFile)
@@ -1514,12 +1568,12 @@ func TestAuthManagerSaveWritesCredentialOnceAtomically(t *testing.T) {
 		dir := t.TempDir()
 		authFile := filepath.Join(dir, "user")
 		codec := &fakeCredentialCodec{encryptErr: errors.New("synthetic encryption failure")}
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol:  &protocolServices{credentials: codec},
 			authFile:  authFile,
 			machineID: "synthetic-machine",
 			ui:        &userInfo{UID: "synthetic-user"},
-		}
+		})
 
 		if err := a.save(context.Background()); err == nil {
 			t.Fatal("save() error = nil, want encryption failure")
@@ -1538,22 +1592,22 @@ func TestAuthManagerSaveWritesCredentialOnceAtomically(t *testing.T) {
 	t.Run("rename failure", func(t *testing.T) {
 		dir := t.TempDir()
 		authFile := filepath.Join(dir, "user")
-		if err := os.Mkdir(authFile, 0o755); err != nil {
-			t.Fatalf("Mkdir() error = %v", err)
-		}
 		codec := &fakeCredentialCodec{encrypted: "synthetic-ciphertext"}
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			protocol:  &protocolServices{credentials: codec},
 			authFile:  authFile,
 			machineID: "synthetic-machine",
 			ui:        &userInfo{UID: "synthetic-user"},
-		}
+		})
 
-		if err := a.save(context.Background()); err == nil {
-			t.Fatal("save() error = nil, want rename failure")
+		if err := os.Mkdir(authFile, 0o700); err != nil {
+			t.Fatal(err)
 		}
-		if codec.encryptCalls != 1 {
-			t.Fatalf("Encrypt() call count = %d, want 1", codec.encryptCalls)
+		if err := a.save(context.Background()); !isAuthConflict(err) {
+			t.Fatalf("nonregular target should fail before encryption: %v", err)
+		}
+		if codec.encryptCalls != 0 {
+			t.Fatalf("Encrypt() call count = %d, want 0", codec.encryptCalls)
 		}
 		if _, err := os.Stat(authFile + ".tmp"); !os.IsNotExist(err) {
 			t.Fatalf("temporary credential exists after rename failure: %v", err)
@@ -1574,14 +1628,14 @@ func TestAuthManagerLoadAcceptsPlainJSONWithoutDecrypt(t *testing.T) {
 	codec := &fakeCredentialCodec{decryptErr: errors.New("decrypt must not be called")}
 	built := &fakeProtocolContext{prepared: &preparedRequest{URL: "https://plain.example.test"}}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{built}}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    codec,
 			runtimeFields:  &fakeRuntimeFieldGenerator{},
 			contextFactory: factory,
 		},
 		authFile: authFile, machineID: "0123456789abcdef-extra", logf: func(string, ...any) {},
-	}
+	})
 
 	if err := a.load(context.Background()); err != nil {
 		t.Fatalf("load() error = %v", err)
@@ -1612,14 +1666,14 @@ func TestAuthManagerLoadDecryptsEncryptedCredentialWithMachineKey(t *testing.T) 
 	}
 	codec := &fakeCredentialCodec{decrypted: `{"uid":"encrypted-user","security_oauth_token":"synthetic-token","encrypt_user_info":"synthetic-encrypted-user","key":"synthetic-key"}`}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    codec,
 			runtimeFields:  &fakeRuntimeFieldGenerator{},
 			contextFactory: factory,
 		},
 		authFile: authFile, machineID: "0123456789abcdef-extra", logf: func(string, ...any) {},
-	}
+	})
 
 	if err := a.load(context.Background()); err != nil {
 		t.Fatalf("load() error = %v", err)
@@ -1639,7 +1693,7 @@ func TestAuthManagerReplaceContextWaitsForReader(t *testing.T) {
 	release := make(chan struct{})
 	old := &fakeProtocolContext{prepareStarted: make(chan struct{}), prepareRelease: release}
 	newCtx := &fakeProtocolContext{prepared: &preparedRequest{URL: "https://new.example.test"}}
-	a := &authManager{protoCtx: old, logf: func(string, ...any) {}}
+	a := syntheticAuthManager(t, &authManager{protoCtx: old, logf: func(string, ...any) {}})
 
 	prepareDone := make(chan error, 1)
 	go func() {
@@ -1685,7 +1739,7 @@ func TestAuthManagerReplaceContextWaitsForReader(t *testing.T) {
 func TestAuthManagerCloseIsIdempotent(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		ctx := &fakeProtocolContext{}
-		a := &authManager{protoCtx: ctx}
+		a := syntheticAuthManager(t, &authManager{protoCtx: ctx})
 		if err := a.Close(); err != nil {
 			t.Fatalf("first Close() error = %v", err)
 		}
@@ -1700,7 +1754,7 @@ func TestAuthManagerCloseIsIdempotent(t *testing.T) {
 	t.Run("first close error is cached", func(t *testing.T) {
 		closeErr := errors.New("synthetic first close failure")
 		ctx := &fakeProtocolContext{closeErr: closeErr}
-		a := &authManager{protoCtx: ctx}
+		a := syntheticAuthManager(t, &authManager{protoCtx: ctx})
 		if err := a.Close(); !errors.Is(err, closeErr) {
 			t.Fatalf("first Close() error = %v, want %v", err, closeErr)
 		}
@@ -1723,7 +1777,7 @@ func TestAuthManagerClosedBlocksRefreshAndPreservesContextClosed(t *testing.T) {
 	defer server.Close()
 
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}, &fakeProtocolContext{}}}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    &fakeCredentialCodec{},
 			runtimeFields:  &fakeRuntimeFieldGenerator{},
@@ -1740,7 +1794,7 @@ func TestAuthManagerClosedBlocksRefreshAndPreservesContextClosed(t *testing.T) {
 		},
 		protoCtx: &fakeProtocolContext{},
 		logf:     func(string, ...any) {},
-	}
+	})
 	if err := a.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -1768,14 +1822,14 @@ func TestAuthManagerClosedLoginOperationsDoNotCallNetwork(t *testing.T) {
 			handler.ServeHTTP(w, r)
 		}))
 		t.Cleanup(server.Close)
-		a := &authManager{
+		a := syntheticAuthManager(t, &authManager{
 			openapiBase: server.URL,
 			webBase:     server.URL,
 			machineID:   "synthetic-machine",
 			httpc:       server.Client(),
 			ui:          &userInfo{SecurityOAuthToken: "synthetic-token"},
 			logf:        func(string, ...any) {},
-		}
+		})
 		if err := a.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
 		}
@@ -1819,13 +1873,13 @@ func TestAuthManagerClosedLoginOperationsDoNotCallNetwork(t *testing.T) {
 }
 
 func TestAuthManagerPrepareWrapsRefreshFailureAsUnavailable(t *testing.T) {
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		ui: &userInfo{
 			SecurityOAuthToken: "synthetic-token",
 			ExpireTime:         time.Now().Add(-time.Minute).Unix(),
 		},
 		protoCtx: &fakeProtocolContext{},
-	}
+	})
 	prepared, err := a.PrepareInferRequest(context.Background(), inferRequestInput{})
 	if prepared != nil {
 		t.Fatalf("prepared request = %#v, want nil", prepared)
@@ -1839,7 +1893,7 @@ func TestAuthManagerPrepareWrapsRefreshFailureAsUnavailable(t *testing.T) {
 }
 
 func TestAuthManagerPrepareReturnsUnavailableWithoutContext(t *testing.T) {
-	a := &authManager{ui: &userInfo{SecurityOAuthToken: "synthetic-token"}}
+	a := syntheticAuthManager(t, &authManager{ui: &userInfo{SecurityOAuthToken: "synthetic-token"}})
 	prepared, err := a.PrepareInferRequest(context.Background(), inferRequestInput{})
 	if prepared != nil {
 		t.Fatalf("prepared request = %#v, want nil", prepared)
@@ -1854,11 +1908,11 @@ func TestAuthManagerConcurrentPrepareReplaceAndCloseAvoidsUseAfterClose(t *testi
 	old := &fakeProtocolContext{prepareStarted: make(chan struct{}), prepareRelease: oldRelease}
 	newRelease := make(chan struct{})
 	newCtx := &fakeProtocolContext{prepareStarted: make(chan struct{}), prepareRelease: newRelease}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		ui:       &userInfo{SecurityOAuthToken: "synthetic-token"},
 		protoCtx: old,
 		logf:     func(string, ...any) {},
-	}
+	})
 
 	oldPrepareDone := make(chan error, 1)
 	go func() {
@@ -1929,12 +1983,12 @@ func TestAuthManagerDoesNotCloseNewContextWhenOldCloseFails(t *testing.T) {
 	old := &fakeProtocolContext{closeErr: errors.New("synthetic close failure")}
 	newCtx := &fakeProtocolContext{prepared: &preparedRequest{URL: "https://new.example.test"}}
 	var logs int
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protoCtx: old,
 		logf: func(string, ...any) {
 			logs++
 		},
-	}
+	})
 
 	if err := a.replaceContext(newCtx); err != nil {
 		t.Fatalf("replaceContext() error = %v, want nil", err)
@@ -1958,13 +2012,13 @@ func TestAuthManagerDoesNotCloseNewContextWhenOldCloseFails(t *testing.T) {
 }
 
 func TestAuthManagerBuildsTypedProtocolInputsWithCopiedTags(t *testing.T) {
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		machineID: "synthetic-machine",
 		ui: &userInfo{
 			UID: "synthetic-user", OrgID: "synthetic-org", OrgTags: []string{"one", "two"},
 			DataPolicyAgreed: true, EncryptUserInfo: "synthetic-encrypted-user", Key: "synthetic-key",
 		},
-	}
+	})
 
 	a.mu.Lock()
 	runtimeInput := a.runtimeFieldInputLocked()
@@ -2032,16 +2086,16 @@ func TestAuthManagerNativeCredentialPlainJSONBypassesDecrypt(t *testing.T) {
 		t.Fatalf("write plaintext credential: %v", err)
 	}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    nativeCredentialCodec{},
 			runtimeFields:  &fakeRuntimeFieldGenerator{},
 			contextFactory: factory,
 		},
 		authFile:  authFile,
-		machineID: "short",
+		machineID: "synthetic-machine",
 		logf:      func(string, ...any) {},
-	}
+	})
 
 	if err := a.load(context.Background()); err != nil {
 		t.Fatalf("load plaintext with native service returned error kind %q", protocolErrorKindOf(err))
@@ -2067,7 +2121,7 @@ func TestAuthManagerNativeCredentialLoadsOfficialFixture(t *testing.T) {
 		t.Fatalf("write fixture credential length %d: %v", len(expected.Encrypted), err)
 	}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    nativeCredentialCodec{},
 			runtimeFields:  &fakeRuntimeFieldGenerator{},
@@ -2076,7 +2130,7 @@ func TestAuthManagerNativeCredentialLoadsOfficialFixture(t *testing.T) {
 		authFile:  authFile,
 		machineID: protocolFixtureMachineID,
 		logf:      func(string, ...any) {},
-	}
+	})
 
 	if err := a.load(context.Background()); err != nil {
 		t.Fatalf("load fixture ciphertext length %d returned error kind %q", len(expected.Encrypted), protocolErrorKindOf(err))
@@ -2105,12 +2159,12 @@ func TestAuthManagerNativeCredentialSaveWritesDecryptableCompleteCiphertext(t *t
 		EncryptUserInfo:    "synthetic-native-save-runtime-field",
 		Key:                "synthetic-native-save-runtime-key",
 	}
-	a := &authManager{
+	a := syntheticAuthManager(t, &authManager{
 		protocol:  &protocolServices{credentials: nativeCredentialCodec{}},
 		authFile:  authFile,
 		machineID: "0123456789abcdef-extra",
 		ui:        want,
-	}
+	})
 
 	if err := a.save(context.Background()); err != nil {
 		t.Fatalf("native credential save returned error kind %q", protocolErrorKindOf(err))
@@ -2146,19 +2200,12 @@ func TestAuthManagerNativeCredentialFailurePrecedesFinalFileWrite(t *testing.T) 
 	if err := os.WriteFile(authFile, original, 0o600); err != nil {
 		t.Fatalf("write existing final state: %v", err)
 	}
-	a := &authManager{
-		protocol:  &protocolServices{credentials: nativeCredentialCodec{}},
-		authFile:  authFile,
-		machineID: "short",
-		ui: &userInfo{
-			UID:                "synthetic-native-failure-user",
-			SecurityOAuthToken: "synthetic-native-failure-token",
-		},
+	if err := os.WriteFile(filepath.Join(dir, "machine_id"), []byte("short"), 0600); err != nil {
+		t.Fatal(err)
 	}
-
-	err := a.save(context.Background())
-	if got := protocolErrorKindOf(err); got != protocolInvalidInput {
-		t.Fatalf("native save invalid-key error kind = %q, want %q", got, protocolInvalidInput)
+	_, err := newAuthManager(storeTestServices(), dir, "", "", "", nil)
+	if !isAuthConflict(err) {
+		t.Fatalf("invalid machine identity should be rejected before any credential write: %v", err)
 	}
 	final, readErr := os.ReadFile(authFile)
 	if readErr != nil {
@@ -2183,7 +2230,7 @@ func TestAuthManagerTypedInputsNormalizeNilOrganizationTagsAtSemanticBoundary(t 
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ui := &userInfo{UID: "synthetic-tag-shape-user", OrgTags: tt.tags}
-			manager := &authManager{machineID: "synthetic-machine", ui: ui}
+			manager := syntheticAuthManager(t, &authManager{machineID: "synthetic-machine", ui: ui})
 			cloned := cloneUserInfo(ui)
 			runtimeInput := manager.runtimeFieldInputForLocked(ui)
 			config := manager.contextConfigForLocked(ui)
@@ -2245,7 +2292,7 @@ func TestAuthManagerDeviceLoginNormalizesNilOrganizationTagsBeforeContextBuild(t
 
 	generator := &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "synthetic-runtime-field", Key: "synthetic-runtime-key"}}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    &fakeCredentialCodec{encrypted: "synthetic-encrypted-credential"},
 			runtimeFields:  generator,
@@ -2257,7 +2304,7 @@ func TestAuthManagerDeviceLoginNormalizesNilOrganizationTagsBeforeContextBuild(t
 		webBase:     server.URL,
 		httpc:       server.Client(),
 		logf:        func(string, ...any) {},
-	}
+	})
 
 	if err := manager.deviceLogin(context.Background(), io.Discard); err != nil {
 		t.Fatalf("deviceLogin() error = %v", err)
@@ -2322,7 +2369,7 @@ func TestAuthManagerStaleDeviceEnrichmentDoesNotMutateNewerLogin(t *testing.T) {
 	staleContext := &fakeProtocolContext{}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{contextA, contextB, staleContext}}
 	codec := &sequentialLoginCredentialCodec{}
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials: codec,
 			runtimeFields: &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{
@@ -2336,7 +2383,7 @@ func TestAuthManagerStaleDeviceEnrichmentDoesNotMutateNewerLogin(t *testing.T) {
 		webBase:     server.URL,
 		httpc:       server.Client(),
 		logf:        func(string, ...any) {},
-	}
+	})
 
 	var deviceOutput bytes.Buffer
 	deviceDone := make(chan error, 1)
@@ -2444,7 +2491,7 @@ func TestAuthManagerDeviceLoginPreservesTwoStageCredentialDurability(t *testing.
 	firstContext := &fakeProtocolContext{}
 	secondContext := &fakeProtocolContext{}
 	codec := &fakeCredentialCodec{encrypted: "synthetic-encrypted-credential"}
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials: codec,
 			runtimeFields: &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{
@@ -2458,7 +2505,7 @@ func TestAuthManagerDeviceLoginPreservesTwoStageCredentialDurability(t *testing.
 		webBase:     server.URL,
 		httpc:       server.Client(),
 		logf:        func(string, ...any) {},
-	}
+	})
 
 	if err := manager.deviceLogin(context.Background(), io.Discard); err != nil {
 		t.Fatalf("deviceLogin() error = %v", err)
@@ -2513,7 +2560,7 @@ func TestAuthManagerPATLoginNormalizesEmptyUserInfoTagsBeforeContextBuild(t *tes
 	generator := &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "synthetic-runtime-field", Key: "synthetic-runtime-key"}}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
 	codec := &fakeCredentialCodec{encrypted: "synthetic-encrypted-credential"}
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    codec,
 			runtimeFields:  generator,
@@ -2524,7 +2571,7 @@ func TestAuthManagerPATLoginNormalizesEmptyUserInfoTagsBeforeContextBuild(t *tes
 		openapiBase: server.URL,
 		httpc:       server.Client(),
 		logf:        func(string, ...any) {},
-	}
+	})
 
 	if err := patLogin(context.Background(), manager, "synthetic-pat"); err != nil {
 		t.Fatalf("patLogin() error = %v", err)
@@ -2557,7 +2604,7 @@ func TestAuthManagerLoadNormalizesAbsentOrNullOrganizationTagsBeforeContextBuild
 			}
 			generator := &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "synthetic-runtime-field", Key: "synthetic-runtime-key"}}
 			factory := &fakeProtocolContextFactory{contexts: []protocolContext{&fakeProtocolContext{}}}
-			manager := &authManager{
+			manager := syntheticAuthManager(t, &authManager{
 				protocol: &protocolServices{
 					credentials:    &fakeCredentialCodec{},
 					runtimeFields:  generator,
@@ -2566,7 +2613,7 @@ func TestAuthManagerLoadNormalizesAbsentOrNullOrganizationTagsBeforeContextBuild
 				authFile:  authFile,
 				machineID: "0123456789abcdef-extra",
 				logf:      func(string, ...any) {},
-			}
+			})
 
 			if err := manager.load(context.Background()); err != nil {
 				t.Fatalf("load() error = %v", err)
@@ -2695,11 +2742,11 @@ func TestAuthManagerDeviceLoginFailureDoesNotCommitCandidate(t *testing.T) {
 			priorSnapshot := cloneUserInfo(priorUI)
 			priorContext := &fakeProtocolContext{}
 			codec := &fakeCredentialCodec{encrypted: "synthetic-candidate-ciphertext"}
-			manager := &authManager{
+			manager := syntheticAuthManager(t, &authManager{
 				authFile: authFile, machineID: "0123456789abcdef-extra",
 				openapiBase: server.URL, webBase: server.URL, httpc: server.Client(),
 				ui: priorUI, protoCtx: priorContext, logf: func(string, ...any) {},
-			}
+			})
 			factory, candidateContext := tt.configureFactory(manager)
 			manager.protocol = &protocolServices{
 				credentials: codec,
@@ -2756,7 +2803,7 @@ func TestAuthManagerDeviceLoginPersistenceFailureDoesNotCommitOrRetryCandidate(t
 		encrypted:   "synthetic-device-candidate-ciphertext",
 		encryptErrs: []error{stageErr, nil},
 	}
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials: codec,
 			runtimeFields: &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{
@@ -2767,7 +2814,7 @@ func TestAuthManagerDeviceLoginPersistenceFailureDoesNotCommitOrRetryCandidate(t
 		authFile: authFile, machineID: "0123456789abcdef-extra",
 		openapiBase: server.URL, webBase: server.URL, httpc: server.Client(),
 		ui: priorUI, protoCtx: priorContext, logf: func(string, ...any) {},
-	}
+	})
 
 	if err := manager.deviceLogin(context.Background(), io.Discard); err == nil || !errors.Is(err, stageErr) {
 		t.Fatalf("deviceLogin() error = %v, want candidate stage failure", err)
@@ -2812,7 +2859,7 @@ func TestAuthManagerPATLoginPersistenceFailureDoesNotCommitOrRetryCandidate(t *t
 		encrypted:   "synthetic-pat-candidate-ciphertext",
 		encryptErrs: []error{stageErr, nil},
 	}
-	manager := &authManager{
+	manager := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials: codec,
 			runtimeFields: &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{
@@ -2823,7 +2870,7 @@ func TestAuthManagerPATLoginPersistenceFailureDoesNotCommitOrRetryCandidate(t *t
 		authFile: authFile, machineID: "0123456789abcdef-extra",
 		openapiBase: server.URL, httpc: server.Client(),
 		ui: priorUI, protoCtx: priorContext, logf: func(string, ...any) {},
-	}
+	})
 
 	if err := patLogin(context.Background(), manager, "synthetic-pat"); err == nil || !errors.Is(err, stageErr) {
 		t.Fatalf("patLogin() error = %v, want candidate stage failure", err)
@@ -2886,7 +2933,7 @@ func TestAuthManagerPATLoginFailureDoesNotCommitCandidate(t *testing.T) {
 			priorContext := &fakeProtocolContext{}
 			codec := &fakeCredentialCodec{encrypted: "synthetic-pat-candidate-ciphertext"}
 			factory := &fakeProtocolContextFactory{err: tt.factoryErr}
-			manager := &authManager{
+			manager := syntheticAuthManager(t, &authManager{
 				protocol: &protocolServices{
 					credentials: codec,
 					runtimeFields: &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{
@@ -2897,7 +2944,7 @@ func TestAuthManagerPATLoginFailureDoesNotCommitCandidate(t *testing.T) {
 				authFile: authFile, machineID: "0123456789abcdef-extra",
 				openapiBase: server.URL, httpc: server.Client(),
 				ui: priorUI, protoCtx: priorContext, logf: func(string, ...any) {},
-			}
+			})
 
 			if err := patLogin(context.Background(), manager, "synthetic-pat"); err == nil {
 				t.Fatal("patLogin() error = nil, want candidate failure")

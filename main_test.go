@@ -367,7 +367,12 @@ func TestLoadCatalogDynamicCacheLoggingIsValueFree(t *testing.T) {
 
 func writeDynamicCatalogCache(t *testing.T, authFile, uid, blob string) string {
 	t.Helper()
-	cachePath := filepath.Clean(filepath.Join(filepath.Dir(authFile), "..", ".models", uid, "catalog-v6"))
+	return writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", blob)
+}
+
+func writeDynamicCatalogCacheVersion(t *testing.T, authFile, uid, filename, blob string) string {
+	t.Helper()
+	cachePath := filepath.Clean(filepath.Join(filepath.Dir(authFile), "..", ".models", uid, filename))
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		t.Fatal("create dynamic catalog directory failed")
 	}
@@ -375,6 +380,535 @@ func writeDynamicCatalogCache(t *testing.T, authFile, uid, blob string) string {
 		t.Fatalf("write dynamic catalog blob length %d failed", len(blob))
 	}
 	return cachePath
+}
+
+// catalogBlobDecryptor records every decrypted input so tests can assert which
+// cache file was actually consulted.
+type catalogBlobDecryptor struct {
+	calls []string
+	data  map[string][]byte
+	err   error
+}
+
+func (d *catalogBlobDecryptor) Decrypt(_ context.Context, input, _ string) ([]byte, error) {
+	d.calls = append(d.calls, input)
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.data[input], nil
+}
+
+func TestLoadCatalogPrefersV7WhenBothCachesExist(t *testing.T) {
+	root := t.TempDir()
+	authFile := filepath.Join(root, ".auth", "user")
+	uid := "synthetic-v7-user"
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v7", "v7-blob")
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+	decryptor := &catalogBlobDecryptor{data: map[string][]byte{
+		"v7-blob": []byte(`{"chat":[{"key":"v7-model","display_name":"V7"}]}`),
+		"v6-blob": []byte(`{"chat":[{"key":"v6-model","display_name":"V6"}]}`),
+	}}
+
+	catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", t.Logf)
+
+	if len(decryptor.calls) != 1 || decryptor.calls[0] != "v7-blob" {
+		t.Fatalf("Decrypt() inputs = %v, want only [v7-blob]", decryptor.calls)
+	}
+	if modelByKey(catalog, "v7-model") == nil {
+		t.Fatal("v7 catalog model was not merged")
+	}
+	if modelByKey(catalog, "v6-model") != nil {
+		t.Fatal("v6 catalog model was merged even though v7 exists")
+	}
+}
+
+func TestLoadCatalogFallsBackToV6OnlyWhenV7Absent(t *testing.T) {
+	root := t.TempDir()
+	authFile := filepath.Join(root, ".auth", "user")
+	uid := "synthetic-v6-fallback-user"
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+	decryptor := &catalogBlobDecryptor{data: map[string][]byte{
+		"v6-blob": []byte(`{"chat":[{"key":"v6-model","display_name":"V6"}]}`),
+	}}
+
+	catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", t.Logf)
+
+	if len(decryptor.calls) != 1 || decryptor.calls[0] != "v6-blob" {
+		t.Fatalf("Decrypt() inputs = %v, want only [v6-blob]", decryptor.calls)
+	}
+	if model := modelByKey(catalog, "v6-model"); model == nil || !model.Enable {
+		t.Fatalf("v6 fallback model = %#v, want merged enabled model", model)
+	}
+}
+
+func TestLoadCatalogV7FailureNeverFallsBackToV6(t *testing.T) {
+	v6Plain := []byte(`{"chat":[{"key":"must-not-merge","display_name":"Must Not Merge"}]}`)
+	uid := "synthetic-v7-failure-user"
+
+	t.Run("v7 read error", func(t *testing.T) {
+		root := t.TempDir()
+		authFile := filepath.Join(root, ".auth", "user")
+		v7Dir := filepath.Clean(filepath.Join(filepath.Dir(authFile), "..", ".models", uid, "catalog-v7"))
+		if err := os.MkdirAll(v7Dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+		decryptor := &catalogBlobDecryptor{data: map[string][]byte{"v6-blob": v6Plain}}
+
+		catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", t.Logf)
+
+		if len(decryptor.calls) != 0 {
+			t.Fatalf("Decrypt() inputs = %v, want none (v6 must not hide v7 read failure)", decryptor.calls)
+		}
+		if modelByKey(catalog, "must-not-merge") != nil {
+			t.Fatal("v6 catalog was merged after a v7 read error")
+		}
+		if modelByKey(catalog, "auto") == nil {
+			t.Fatal("builtin fallback catalog is missing auto")
+		}
+	})
+
+	t.Run("v7 decrypt failure", func(t *testing.T) {
+		root := t.TempDir()
+		authFile := filepath.Join(root, ".auth", "user")
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v7", "v7-blob")
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+		decryptor := &catalogBlobDecryptor{data: map[string][]byte{"v6-blob": v6Plain}, err: errors.New("synthetic v7 decrypt failure")}
+
+		catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", t.Logf)
+
+		if len(decryptor.calls) != 1 || decryptor.calls[0] != "v7-blob" {
+			t.Fatalf("Decrypt() inputs = %v, want only [v7-blob]", decryptor.calls)
+		}
+		if modelByKey(catalog, "must-not-merge") != nil {
+			t.Fatal("v6 catalog was merged after a v7 decrypt failure")
+		}
+		if modelByKey(catalog, "auto") == nil {
+			t.Fatal("builtin fallback catalog is missing auto")
+		}
+	})
+
+	t.Run("v7 invalid JSON", func(t *testing.T) {
+		root := t.TempDir()
+		authFile := filepath.Join(root, ".auth", "user")
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v7", "v7-blob")
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+		decryptor := &catalogBlobDecryptor{data: map[string][]byte{
+			"v7-blob": []byte("synthetic invalid JSON"),
+			"v6-blob": v6Plain,
+		}}
+
+		catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", t.Logf)
+
+		if len(decryptor.calls) != 1 || decryptor.calls[0] != "v7-blob" {
+			t.Fatalf("Decrypt() inputs = %v, want only [v7-blob]", decryptor.calls)
+		}
+		if modelByKey(catalog, "must-not-merge") != nil {
+			t.Fatal("v6 catalog was merged after v7 plaintext failed to parse")
+		}
+		if modelByKey(catalog, "auto") == nil {
+			t.Fatal("builtin fallback catalog is missing auto")
+		}
+	})
+
+	t.Run("v7 empty plaintext", func(t *testing.T) {
+		root := t.TempDir()
+		authFile := filepath.Join(root, ".auth", "user")
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v7", "v7-blob")
+		writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+		decryptor := &catalogBlobDecryptor{data: map[string][]byte{
+			"v7-blob": []byte{},
+			"v6-blob": v6Plain,
+		}}
+
+		catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", t.Logf)
+
+		if len(decryptor.calls) != 1 || decryptor.calls[0] != "v7-blob" {
+			t.Fatalf("Decrypt() inputs = %v, want only [v7-blob]", decryptor.calls)
+		}
+		if modelByKey(catalog, "must-not-merge") != nil {
+			t.Fatal("v6 catalog was merged after v7 decrypted to empty content")
+		}
+		if modelByKey(catalog, "auto") == nil {
+			t.Fatal("builtin fallback catalog is missing auto")
+		}
+	})
+}
+
+func TestLoadCatalogExplicitCatalogOverridesCacheFiles(t *testing.T) {
+	root := t.TempDir()
+	authFile := filepath.Join(root, ".auth", "user")
+	uid := "synthetic-explicit-override-user"
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v7", "v7-blob")
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(path, []byte(`{"chat":[{"key":"explicit","display_name":"Explicit"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decryptor := &catalogBlobDecryptor{err: errors.New("must not be called")}
+
+	catalog := loadCatalog(context.Background(), decryptor, authFile, uid, path, t.Logf)
+
+	if len(decryptor.calls) != 0 {
+		t.Fatalf("Decrypt() inputs = %v, want none (explicit catalog must win)", decryptor.calls)
+	}
+	if modelByKey(catalog, "explicit") == nil {
+		t.Fatal("explicit catalog model was not merged")
+	}
+}
+
+func TestLoadCatalogUsesSelectedAuthFileRoot(t *testing.T) {
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+	authFileA := filepath.Join(rootA, ".auth", "user")
+	authFileB := filepath.Join(rootB, ".auth", "user")
+	uid := "synthetic-root-user"
+	writeDynamicCatalogCacheVersion(t, authFileA, uid, "catalog-v7", "blob-a")
+	writeDynamicCatalogCacheVersion(t, authFileB, uid, "catalog-v7", "blob-b")
+	decryptor := &catalogBlobDecryptor{data: map[string][]byte{
+		"blob-a": []byte(`{"chat":[{"key":"root-a-model","display_name":"Root A"}]}`),
+		"blob-b": []byte(`{"chat":[{"key":"root-b-model","display_name":"Root B"}]}`),
+	}}
+
+	catalog := loadCatalog(context.Background(), decryptor, authFileA, uid, "", t.Logf)
+
+	if len(decryptor.calls) != 1 || decryptor.calls[0] != "blob-a" {
+		t.Fatalf("Decrypt() inputs = %v, want only [blob-a]", decryptor.calls)
+	}
+	if modelByKey(catalog, "root-a-model") == nil {
+		t.Fatal("selected root's catalog model was not merged")
+	}
+	if modelByKey(catalog, "root-b-model") != nil {
+		t.Fatal("catalog from another root leaked into the selected root")
+	}
+}
+
+func writeExplicitCatalog(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadCatalogEntryAliases(t *testing.T) {
+	path := writeExplicitCatalog(t, `{"chat":[
+		{"model_key":"model-key-alias","display_name":"Model Key Alias"},
+		{"key":null,"model_key":"null-key-alias","name":"Null Key Alias"},
+		{"key":"primary-key","model_key":"ignored-alias","display_name":null,"name":"Name Alias"},
+		{"key":123,"model_key":"numeric-key-alias","display_name":"Numeric Key Alias"},
+		{"display_name":"No Key"},
+		{"key":"","model_key":"empty-key-alias","display_name":"Empty Key"},
+		{"key":"empty-display","display_name":"","name":"Name Fallback"}
+	]}`)
+	catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+
+	want := []struct{ key, name string }{
+		{"model-key-alias", "Model Key Alias"},
+		{"null-key-alias", "Null Key Alias"},
+		{"primary-key", "Name Alias"},
+		{"empty-display", ""},
+	}
+	for _, w := range want {
+		model := modelByKey(catalog, w.key)
+		if model == nil {
+			t.Errorf("alias entry %q missing from catalog", w.key)
+			continue
+		}
+		if model.DisplayName != w.name {
+			t.Errorf("entry %q display_name = %q, want %q", w.key, model.DisplayName, w.name)
+		}
+	}
+	// Explicit empty key is not nullish: the entry must be skipped rather than
+	// falling back to model_key.
+	if modelByKey(catalog, "empty-key-alias") != nil {
+		t.Error("explicit empty key fell back to model_key")
+	}
+}
+
+func TestLoadCatalogExplicitEmptyDisplayNameDoesNotFallBackToName(t *testing.T) {
+	path := writeExplicitCatalog(t, `{"chat":[
+		{"key":"empty-display","display_name":"","name":"Name Fallback"}
+	]}`)
+	catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+
+	model := modelByKey(catalog, "empty-display")
+	if model == nil {
+		t.Fatal("entry with explicit empty display_name missing from catalog")
+	}
+	if model.DisplayName != "" {
+		t.Fatalf("display_name = %q, want empty (explicit empty is not nullish)", model.DisplayName)
+	}
+}
+
+func TestLoadCatalogEnableSemantics(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want bool
+	}{
+		{"missing enable", `{"key":"alias-model"}`, true},
+		{"null enable", `{"key":"alias-model","enable":null}`, true},
+		{"true enable", `{"key":"alias-model","enable":true}`, true},
+		{"explicit false", `{"key":"alias-model","enable":false}`, false},
+		{"numeric zero", `{"key":"alias-model","enable":0}`, false},
+		{"numeric one", `{"key":"alias-model","enable":1}`, true},
+		{"string enable", `{"key":"alias-model","enable":"false"}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeExplicitCatalog(t, `{"chat":[`+tt.json+`]}`)
+			catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+			model := modelByKey(catalog, "alias-model")
+			if model == nil {
+				t.Fatalf("entry missing from catalog")
+			}
+			if model.Enable != tt.want {
+				t.Fatalf("Enable = %v, want %v", model.Enable, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadCatalogDisabledEntryOverridesBuiltinWithoutReenabling(t *testing.T) {
+	path := writeExplicitCatalog(t, `{"chat":[{"key":"auto","enable":false}]}`)
+
+	catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+
+	model := modelByKey(catalog, "auto")
+	if model == nil || model.Enable {
+		t.Fatalf("disabled auto entry = %#v, want present with Enable=false", model)
+	}
+	if modelByKey(catalog, "gmodel") == nil {
+		t.Fatal("disabled builtin override lost other builtin models")
+	}
+	resolver := newModelResolver(catalog, nil, "auto", "ultimate")
+	if resolved := resolver.byKeyOrSynthetic("auto"); resolved == nil || resolved.Enable {
+		t.Fatalf("byKeyOrSynthetic(auto) = %#v, want disabled known entry", resolved)
+	}
+	if resolved := resolver.resolve("auto"); resolved.Enable {
+		t.Fatalf("resolve(auto) = %#v, want disabled metadata preserved", resolved)
+	}
+	if resolved := resolver.resolve("unknown-model"); resolved.Key != "auto" || resolved.Enable {
+		t.Fatalf("resolve(unknown) = %#v, want default auto with Enable=false", resolved)
+	}
+}
+
+func TestLoadCatalogGroupCollisionRules(t *testing.T) {
+	path := writeExplicitCatalog(t, `{
+		"chat": [
+			{"key":"shared","display_name":"Chat Shared","context_config":{"default":{"token_count":500000}}},
+			{"key":"chat-dup","display_name":"First"},
+			{"key":"chat-dup","display_name":"Second"},
+			{"key":"blocked","enable":false}
+		],
+		"byok_enterprise": [
+			{"key":"shared","display_name":"Enterprise Shared","source":"organization"},
+			{"key":"ent-dup","display_name":"First Ent"},
+			{"key":"ent-dup","display_name":"Second Ent"},
+			{"key":"blocked","enable":true,"display_name":"Enterprise Blocked"}
+		],
+		"byok_teams": [
+			{"key":"ent-dup","display_name":"Team Ent"},
+			{"key":"team-model","display_name":"Team Model","source":"byokTeams"}
+		]
+	}`)
+
+	catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+
+	if model := modelByKey(catalog, "shared"); model == nil || model.DisplayName != "Chat Shared" || model.Source != "system" {
+		t.Fatalf("shared key = %#v, want chat entry to win over enterprise", model)
+	}
+	if model := modelByKey(catalog, "chat-dup"); model == nil || model.DisplayName != "Second" {
+		t.Fatalf("chat-dup = %#v, want later chat duplicate to win", model)
+	}
+	if model := modelByKey(catalog, "ent-dup"); model == nil || model.DisplayName != "First Ent" {
+		t.Fatalf("ent-dup = %#v, want first non-default duplicate to win", model)
+	}
+	if model := modelByKey(catalog, "blocked"); model == nil || model.Enable || model.DisplayName == "Enterprise Blocked" {
+		t.Fatalf("blocked = %#v, want disabled chat entry to win over enterprise", model)
+	}
+	if model := modelByKey(catalog, "team-model"); model == nil || model.Source != "byokTeams" {
+		t.Fatalf("team-model = %#v, want BYOK teams entry with source", model)
+	}
+	if model := modelByKey(catalog, "shared"); model != nil && model.MaxInputTokens != 500000 {
+		t.Fatalf("shared max_input_tokens = %d, want context tier maximum 500000", model.MaxInputTokens)
+	}
+}
+
+func TestLoadCatalogIgnoresUnsupportedSceneGroups(t *testing.T) {
+	path := writeExplicitCatalog(t, `{
+		"chat": [{"key":"chat-model","display_name":"Chat"}],
+		"embedding": [{"key":"embedding-model","display_name":"Embedding"}],
+		"service_account": [{"key":"service-account-model","display_name":"Service Account"}]
+	}`)
+
+	catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+
+	if modelByKey(catalog, "chat-model") == nil {
+		t.Fatal("chat scene entry missing")
+	}
+	for _, key := range []string{"embedding-model", "service-account-model"} {
+		if modelByKey(catalog, key) != nil {
+			t.Errorf("unsupported scene entry %q leaked into the catalog", key)
+		}
+	}
+}
+
+func TestLoadCatalogUnsupportedSceneCannotTouchSupportedKeys(t *testing.T) {
+	path := writeExplicitCatalog(t, `{
+		"chat": [{"key":"supported","display_name":"Chat Supported"}],
+		"other_scene": [
+			{"key":"auto","enable":false},
+			{"key":"supported","display_name":"Scene Override"}
+		]
+	}`)
+
+	catalog := loadCatalog(context.Background(), nil, "", "", path, t.Logf)
+
+	if model := modelByKey(catalog, "supported"); model == nil || model.DisplayName != "Chat Supported" {
+		t.Fatalf("supported = %#v, want chat entry untouched by unsupported scene", model)
+	}
+	if model := modelByKey(catalog, "auto"); model == nil || !model.Enable {
+		t.Fatalf("auto = %#v, want enabled builtin untouched by unsupported scene", model)
+	}
+}
+
+func TestLoadCatalogInvalidJSONLogsContentSilentDiagnostic(t *testing.T) {
+	path := writeExplicitCatalog(t, `{"chat":[{"key":"leak`)
+
+	logs, logf := captureCatalogLogs()
+	catalog := loadCatalog(context.Background(), nil, "", "", path, logf)
+
+	if modelByKey(catalog, "auto") == nil {
+		t.Fatal("invalid JSON fallback lacks builtin auto model")
+	}
+	if !strings.Contains(logs.String(), "catalog parse failed") {
+		t.Fatalf("invalid JSON log lacks parse diagnostic: %q", logs.String())
+	}
+	assertCatalogLogOmits(t, logs.String(), "leak")
+}
+
+func TestLoadCatalogNonCatalogShapesFailWithDiagnostic(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"null document", `null`},
+		{"chat object not array", `{"chat":{"bad":"value"}}`},
+		{"wrapper data", `{"data":{"chat":[{"key":"wrapped"}]}}`},
+		{"only unsupported scenes", `{"embedding":[{"key":"embed"}]}`},
+		{"chat null", `{"chat":null}`},
+		{"byok enterprise null", `{"byok_enterprise":null}`},
+		{"all null groups", `{"chat":null,"byok_enterprise":{},"byok_teams":null}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeExplicitCatalog(t, tt.data)
+			logs, logf := captureCatalogLogs()
+
+			catalog := loadCatalog(context.Background(), nil, "", "", path, logf)
+
+			if modelByKey(catalog, "auto") == nil {
+				t.Fatal("non-catalog shape fallback lacks builtin auto model")
+			}
+			for _, key := range []string{"bad", "wrapped", "embed"} {
+				if modelByKey(catalog, key) != nil {
+					t.Errorf("entry %q merged from non-catalog shape", key)
+				}
+			}
+			if !strings.Contains(logs.String(), "catalog parse failed") {
+				t.Fatalf("non-catalog shape log lacks parse diagnostic: %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestLoadCatalogSupportedGroupsResilience(t *testing.T) {
+	t.Run("empty supported array is valid", func(t *testing.T) {
+		path := writeExplicitCatalog(t, `{"chat":[]}`)
+		logs, logf := captureCatalogLogs()
+		_ = logs
+
+		catalog := loadCatalog(context.Background(), nil, "", "", path, logf)
+
+		if modelByKey(catalog, "auto") == nil {
+			t.Fatal("empty chat array fallback lacks builtin auto model")
+		}
+		if output := logs.String(); output != "" {
+			t.Fatalf("valid empty catalog log = %q, want silence", output)
+		}
+	})
+
+	t.Run("supported group survives bad neighbors and entries", func(t *testing.T) {
+		path := writeExplicitCatalog(t, `{
+			"chat": [
+				{"key":"good-model","display_name":"Good"},
+				{"key":null},
+				"not-an-object",
+				{"display_name":"No Key"}
+			],
+			"embedding": [{"key":"ignored-model"}],
+			"byok_teams": [{"key":"team-model","display_name":"Team","source":"byokTeams"}]
+		}`)
+		logs, logf := captureCatalogLogs()
+		_ = logs
+
+		catalog := loadCatalog(context.Background(), nil, "", "", path, logf)
+
+		if modelByKey(catalog, "good-model") == nil {
+			t.Fatal("valid chat entry discarded because of bad neighbor entries")
+		}
+		if model := modelByKey(catalog, "team-model"); model == nil || model.Source != "byokTeams" {
+			t.Fatalf("team-model = %#v, want supported byok_teams entry preserved", model)
+		}
+		if modelByKey(catalog, "ignored-model") != nil {
+			t.Fatal("unsupported scene entry merged alongside supported groups")
+		}
+	})
+
+	t.Run("null group tolerated when a valid supported array exists", func(t *testing.T) {
+		path := writeExplicitCatalog(t, `{"chat":null,"byok_teams":[]}`)
+		logs, logf := captureCatalogLogs()
+
+		catalog := loadCatalog(context.Background(), nil, "", "", path, logf)
+
+		if modelByKey(catalog, "auto") == nil {
+			t.Fatal("valid control fallback lacks builtin auto model")
+		}
+		if output := logs.String(); output != "" {
+			t.Fatalf("valid control log = %q, want silence", output)
+		}
+	})
+}
+
+func TestLoadCatalogNonCatalogShapeV7NeverFallsBackToV6(t *testing.T) {
+	root := t.TempDir()
+	authFile := filepath.Join(root, ".auth", "user")
+	uid := "synthetic-shape-failure-user"
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v7", "v7-blob")
+	writeDynamicCatalogCacheVersion(t, authFile, uid, "catalog-v6", "v6-blob")
+	decryptor := &catalogBlobDecryptor{data: map[string][]byte{
+		"v7-blob": []byte(`null`),
+		"v6-blob": []byte(`{"chat":[{"key":"must-not-merge","display_name":"Must Not Merge"}]}`),
+	}}
+	logs, logf := captureCatalogLogs()
+
+	catalog := loadCatalog(context.Background(), decryptor, authFile, uid, "", logf)
+
+	if len(decryptor.calls) != 1 || decryptor.calls[0] != "v7-blob" {
+		t.Fatalf("Decrypt() inputs = %v, want only [v7-blob]", decryptor.calls)
+	}
+	if modelByKey(catalog, "must-not-merge") != nil {
+		t.Fatal("v6 catalog was read to hide a v7 non-catalog shape failure")
+	}
+	if modelByKey(catalog, "auto") == nil {
+		t.Fatal("shape failure fallback lacks builtin auto model")
+	}
+	if !strings.Contains(logs.String(), "catalog parse failed") {
+		t.Fatalf("shape failure log lacks parse diagnostic: %q", logs.String())
+	}
 }
 
 func mutateCatalogQMCBlob(t *testing.T, blob string, index int) string {
@@ -409,11 +943,11 @@ func assertCatalogLogOmits(t *testing.T, output string, forbidden ...string) {
 }
 
 func TestQoderProtocolVersion(t *testing.T) {
-	if qoderProtocolVersion != "1.1.34" {
-		t.Fatalf("qoderProtocolVersion = %q, want %q", qoderProtocolVersion, "1.1.34")
+	if qoderProtocolVersion != "1.1.74" {
+		t.Fatalf("qoderProtocolVersion = %q, want %q", qoderProtocolVersion, "1.1.74")
 	}
-	if qoderUserAgent() != "qoder/1.1.34" {
-		t.Fatalf("qoderUserAgent() = %q, want %q", qoderUserAgent(), "qoder/1.1.34")
+	if qoderUserAgent() != "qoder/1.1.74" {
+		t.Fatalf("qoderUserAgent() = %q, want %q", qoderUserAgent(), "qoder/1.1.74")
 	}
 }
 

@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 )
 
 type freeAccounting struct{ ResultStrings, Contexts, RequestResults int }
+type deterministicHost interface {
+	Now() (time.Time, error)
+	Read([]byte) error
+}
 type wasmBackend struct {
 	runtime             wazero.Runtime
 	compiled            wazero.CompiledModule
@@ -19,7 +24,7 @@ type wasmBackend struct {
 	functions           map[string]api.Function
 	heap                []any
 	heapNext            uint32
-	replay              *orderedReplay
+	replay              deterministicHost
 	hostFail            error
 	accounting          freeAccounting
 }
@@ -57,7 +62,7 @@ func newWASMBackend(ctx context.Context, source []byte) (*wasmBackend, error) {
 		}
 		*dst = fn
 	}
-	for _, name := range []string{"credential_storage_encrypt", "credential_storage_decrypt", "generate_runtime_auth_fields", "model_cache_encrypt", "model_cache_decrypt", "qodercontext_new", "qodercontext_prepareInferRequest", "requestresult_url", "requestresult_headers", "requestresult_body", "__wbg_qodercontext_free", "__wbg_requestresult_free"} {
+	for _, name := range []string{"credential_storage_encrypt", "credential_storage_decrypt", "generate_runtime_auth_fields", "model_cache_encrypt", "model_cache_decrypt", "decrypt_server_response", "qodercontext_new", "qodercontext_prepareInferRequest", "requestresult_url", "requestresult_headers", "requestresult_body", "__wbg_qodercontext_free", "__wbg_requestresult_free"} {
 		fn := module.ExportedFunction(name)
 		if fn == nil {
 			return failClose(fail("wasm-abi"))
@@ -72,7 +77,7 @@ func (w *wasmBackend) Close(ctx context.Context) error {
 	}
 	return nil
 }
-func (w *wasmBackend) setReplay(replay *orderedReplay) { w.replay = replay; w.hostFail = nil }
+func (w *wasmBackend) setReplay(replay deterministicHost) { w.replay = replay; w.hostFail = nil }
 func (w *wasmBackend) add(v any) uint32 {
 	if w.heapNext == uint32(len(w.heap)) {
 		w.heap = append(w.heap, uint64(len(w.heap)+1))

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Offline Go and protocol tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: "off"
+      GOFLAGS: -mod=readonly
+      QODER2API_E2E: "0"
+      QODER2API_E2E_REFRESH: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Unit tests
+        run: go test -count=1 ./...
+
+      - name: Race tests
+        run: go test -race -count=1 ./...
+
+      - name: Static analysis
+        run: go vet ./...
+
+      - name: Offline E2E and observer tests
+        run: go test -tags=e2e -count=1 ./...
+
+      - name: Standalone oracle unit tests
+        working-directory: tools/wasm_oracle
+        run: go test -count=1 ./...
+
+      - name: Protocol harness self-test
+        run: python3 -B tools/wasm_harness.py --self-test

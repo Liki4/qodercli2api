@@ -1,4 +1,5 @@
 # Build outputs and downloaded executables
+/bin/
 /qodercli2api
 /qodercli2api-*
 /qodercli-*
@@ -10,6 +11,8 @@
 /.qoder/
 /.qodercli2api/
 /.claude/
+/login.md
+/next-session.md
 /dumps/
 *.sqlite
 *.sqlite-shm
@@ -18,10 +21,12 @@
 # Reverse-engineering workspace is local-only
 /re/
 
-# Only the two reviewed public documents are tracked
+# Only reviewed public protocol and analysis documents are tracked
 /docs/*
 !/docs/oauth.md
 !/docs/inference-protocol.md
+!/docs/qodercli-1.1.74-analysis.md
+!/docs/development.md
 
 # Python/local tool state
 __pycache__/

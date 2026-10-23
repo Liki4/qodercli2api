@@ -238,6 +238,12 @@ func validateTranscript(name string, value transcript) error {
 }
 
 func validateNestedFixture(name string, fixture fixtureDocument) error {
+	if _, err := policyForIdentity(fixture.Oracle); err != nil {
+		return err
+	}
+	if name == "compatibility.json" {
+		return validateCompatibilityFixture(fixture)
+	}
 	if err := validateTranscript(name, fixture.Transcript); err != nil {
 		return err
 	}
@@ -280,7 +286,7 @@ func validateNestedFixture(name string, fixture fixtureDocument) error {
 		if decodeStrictValue(fixture.Input, &input) != nil || decodeStrictValue(fixture.Expected, &expected) != nil || decodeStrictValue([]byte(input.BodyRaw), &body) != nil {
 			return fail("fixture-synthetic-schema")
 		}
-		if err := validateInferInput(input, body); err != nil {
+		if err := validateInferInput(input, body, fixture.Oracle.Version); err != nil {
 			return err
 		}
 		if err := validateInferExpected(input, expected); err != nil {
@@ -293,7 +299,7 @@ func validateNestedFixture(name string, fixture fixtureDocument) error {
 		if decodeStrictValue(fixture.Input, &input) != nil || decodeStrictValue(fixture.Expected, &expected) != nil || decodeStrictValue([]byte(input.BodyRaw), &body) != nil {
 			return fail("fixture-synthetic-schema")
 		}
-		if err := validateNoOrgInferInput(input, body); err != nil {
+		if err := validateNoOrgInferInput(input, body, fixture.Oracle.Version); err != nil {
 			return err
 		}
 		if err := validateNoOrgInferExpected(input, expected); err != nil {
@@ -305,26 +311,35 @@ func validateNestedFixture(name string, fixture fixtureDocument) error {
 	return nil
 }
 
-func validateInferInput(input inferFixtureInputPolicy, body remoteBody) error {
+func inferHashesForVersion(version string) (raw, body, authorization string) {
+	if version == upgradeVersion {
+		return "37e850fcf89472f0d097b99f68b74129ac9fe20e4d1e0e45b421e0d85e3eeeb6", "3d9ab43b07b0b47d402dbd2041e7d1f375304c0aa1ffb2857070b05da5d3adc5", "f8aa36989b61e90e663d34ea73c0c9ce03409ac469e292fd510919947a5043c6"
+	}
+	return inferBodyRawHash, inferBodyHash, inferAuthorizationHash
+}
+
+func validateInferInput(input inferFixtureInputPolicy, body remoteBody, version string) error {
+	rawHash, _, _ := inferHashesForVersion(version)
 	wantUser := inferUser{syntheticUID, input.User.EncryptUserInfo, input.User.Key, syntheticOrg, []string{"synthetic-a", "b"}, true}
 	wantScene := inferScene{"5", "cli", "agent", "assistant"}
-	if input.MachineID != syntheticMachineID || input.Version != pinnedVersion || !reflect.DeepEqual(input.User, wantUser) || stringHash(input.User.EncryptUserInfo) != runtimeInfoHash || stringHash(input.User.Key) != runtimeKeyHash || input.Scene != wantScene || input.Endpoint != syntheticEndpoint || input.ModelKey != "auto" || input.ModelSource != "system" || stringHash(input.BodyRaw) != inferBodyRawHash {
+	if input.MachineID != syntheticMachineID || input.Version != version || !reflect.DeepEqual(input.User, wantUser) || stringHash(input.User.EncryptUserInfo) != runtimeInfoHash || stringHash(input.User.Key) != runtimeKeyHash || input.Scene != wantScene || input.Endpoint != syntheticEndpoint || input.ModelKey != "auto" || input.ModelSource != "system" || stringHash(input.BodyRaw) != rawHash {
 		return fail("fixture-synthetic-schema")
 	}
-	return validateInferBody(body)
+	return validateInferBody(body, version)
 }
 
-func validateNoOrgInferInput(input inferFixtureInputPolicy, body remoteBody) error {
+func validateNoOrgInferInput(input inferFixtureInputPolicy, body remoteBody, version string) error {
+	rawHash, _, _ := inferHashesForVersion(version)
 	wantUser := inferUser{syntheticUID, noOrgCallerInfo, noOrgCallerKey, "", []string{}, false}
 	wantScene := inferScene{"5", "cli", "agent", "assistant"}
-	if input.MachineID != syntheticMachineID || input.Version != pinnedVersion || !reflect.DeepEqual(input.User, wantUser) || input.Scene != wantScene || input.Endpoint != syntheticEndpoint || input.ModelKey != "" || input.ModelSource != "system" || stringHash(input.BodyRaw) != inferBodyRawHash {
+	if input.MachineID != syntheticMachineID || input.Version != version || !reflect.DeepEqual(input.User, wantUser) || input.Scene != wantScene || input.Endpoint != syntheticEndpoint || input.ModelKey != "" || input.ModelSource != "system" || stringHash(input.BodyRaw) != rawHash {
 		return fail("fixture-synthetic-schema")
 	}
-	return validateInferBody(body)
+	return validateInferBody(body, version)
 }
 
-func validateInferBody(body remoteBody) error {
-	if body.AgentID != "agent_common" || body.AliyunUserType != "" || body.Business != (remoteBusiness{syntheticUnixMilli, "synthetic-business-0001", "synthetic-", "cli", "start", "agent", pinnedVersion}) || string(body.ChatContext) != "{}" || body.ChatRecordID != "synthetic-request-0001" || body.ChatTask != "FREE_INPUT" || string(body.CustomModel) != "null" || !body.IsReply || body.IsRetry || body.RequestID != "synthetic-request-0001" || body.RequestSetID != "synthetic-request-0001" || body.SessionID != "synthetic-session-0001" || body.SessionType != "qodercli" || body.Source != 1 || !body.Stream || body.System != "synthetic-system-prompt-0001" || body.TaskID != "common" || body.Version != "3" {
+func validateInferBody(body remoteBody, version string) error {
+	if body.AgentID != "agent_common" || body.AliyunUserType != "" || body.Business != (remoteBusiness{syntheticUnixMilli, "synthetic-business-0001", "synthetic-", "cli", "start", "agent", version}) || string(body.ChatContext) != "{}" || body.ChatRecordID != "synthetic-request-0001" || body.ChatTask != "FREE_INPUT" || string(body.CustomModel) != "null" || !body.IsReply || body.IsRetry || body.RequestID != "synthetic-request-0001" || body.RequestSetID != "synthetic-request-0001" || body.SessionID != "synthetic-session-0001" || body.SessionType != "qodercli" || body.Source != 1 || !body.Stream || body.System != "synthetic-system-prompt-0001" || body.TaskID != "common" || body.Version != "3" {
 		return fail("fixture-synthetic-schema")
 	}
 	if len(body.Messages) != 2 || body.Messages[0].Role != "system" || body.Messages[0].Content != "synthetic-system-prompt-0001" || len(body.Messages[0].Contents) != 0 || body.Messages[1].Role != "user" || body.Messages[1].Content != "synthetic-user-message-0001" || !reflect.DeepEqual(body.Messages[1].Contents, []remoteContent{{"text", "synthetic-user-message-0001"}}) {
@@ -341,8 +356,9 @@ func validateInferBody(body remoteBody) error {
 
 func validateInferExpected(input inferFixtureInputPolicy, expected inferFixtureExpectedPolicy) error {
 	const expectedURL = "https://example.invalid/base/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+	_, bodyHash, _ := inferHashesForVersion(input.Version)
 	decodedBody, err := base64.StdEncoding.Strict().DecodeString(expected.BodyBytes)
-	if err != nil || string(decodedBody) != expected.BodyString || stringHash(expected.BodyString) != inferBodyHash || expected.URL != expectedURL {
+	if err != nil || string(decodedBody) != expected.BodyString || stringHash(expected.BodyString) != bodyHash || expected.URL != expectedURL {
 		return fail("fixture-synthetic-schema")
 	}
 	want := map[string]string{
@@ -350,7 +366,7 @@ func validateInferExpected(input inferFixtureInputPolicy, expected inferFixtureE
 		"Cosy-Business-Product": "cli", "Cosy-Business-Type": "agent", "Cosy-Clienttype": "5", "Cosy-Data-Policy": "agree",
 		"Cosy-Date": "1781000123", "Cosy-Key": input.User.Key, "Cosy-Machineid": syntheticMachineID, "Cosy-Machinetoken": syntheticMachineID,
 		"Cosy-Machinetype": "5", "Cosy-Organization-Id": syntheticOrg, "Cosy-Organization-Tags": "synthetic-a,b", "Cosy-Scene": "assistant",
-		"Cosy-User": syntheticUID, "Cosy-Version": pinnedVersion, "Login-Version": "v2", "X-Model-Key": "auto", "X-Model-Source": "system",
+		"Cosy-User": syntheticUID, "Cosy-Version": input.Version, "Login-Version": "v2", "X-Model-Key": "auto", "X-Model-Source": "system",
 	}
 	if len(expected.Header) != len(want)+1 {
 		return fail("fixture-synthetic-schema")
@@ -361,7 +377,8 @@ func validateInferExpected(input inferFixtureInputPolicy, expected inferFixtureE
 		}
 	}
 	auth := expected.Header["Authorization"]
-	if len(auth) != 1 || stringHash(auth[0]) != inferAuthorizationHash {
+	_, _, authorizationHash := inferHashesForVersion(input.Version)
+	if len(auth) != 1 || stringHash(auth[0]) != authorizationHash {
 		return fail("fixture-synthetic-schema")
 	}
 	return nil
@@ -395,15 +412,16 @@ func inferExpectedAuthorizationPayload(expected inferFixtureExpectedPolicy) (inf
 
 func validateNoOrgInferExpected(input inferFixtureInputPolicy, expected inferFixtureExpectedPolicy) error {
 	const expectedURL = "https://example.invalid/base/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+	_, bodyHash, _ := inferHashesForVersion(input.Version)
 	decodedBody, err := base64.StdEncoding.Strict().DecodeString(expected.BodyBytes)
-	if err != nil || string(decodedBody) != expected.BodyString || stringHash(expected.BodyString) != inferBodyHash || expected.URL != expectedURL {
+	if err != nil || string(decodedBody) != expected.BodyString || stringHash(expected.BodyString) != bodyHash || expected.URL != expectedURL {
 		return fail("fixture-synthetic-schema")
 	}
 	want := map[string]string{
 		"Accept": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Content-Type": "application/json",
 		"Cosy-Business-Product": "cli", "Cosy-Business-Type": "agent", "Cosy-ClientType": "5", "Cosy-Data-Policy": "disagree",
 		"Cosy-Date": "1781000123", "Cosy-Key": input.User.Key, "Cosy-MachineId": syntheticMachineID, "Cosy-MachineToken": syntheticMachineID,
-		"Cosy-MachineType": "5", "Cosy-Scene": "assistant", "Cosy-User": syntheticUID, "Cosy-Version": pinnedVersion, "Login-Version": "v2",
+		"Cosy-MachineType": "5", "Cosy-Scene": "assistant", "Cosy-User": syntheticUID, "Cosy-Version": input.Version, "Login-Version": "v2",
 	}
 	if len(expected.Header) != len(want)+1 {
 		return fail("fixture-synthetic-schema")
@@ -420,7 +438,7 @@ func validateNoOrgInferExpected(input inferFixtureInputPolicy, expected inferFix
 		}
 	}
 	payload, err := inferExpectedAuthorizationPayload(expected)
-	if err != nil || payload.Version != "v1" || payload.RequestID != "8d8c8b8a-8988-4786-8584-838281807f7e" || payload.Info != input.User.EncryptUserInfo || payload.CosyVersion != pinnedVersion || payload.IDEVersion != "" {
+	if err != nil || payload.Version != "v1" || payload.RequestID != "8d8c8b8a-8988-4786-8584-838281807f7e" || payload.Info != input.User.EncryptUserInfo || payload.CosyVersion != input.Version || payload.IDEVersion != "" {
 		return fail("fixture-synthetic-schema")
 	}
 	return nil

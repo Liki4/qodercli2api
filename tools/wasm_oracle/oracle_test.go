@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,6 +12,52 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestVersionRegistrySelectsExactIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		identity oracleIdentity
+		category string
+	}{
+		{"historical", oracleIdentity{"1.1.34", 297238, "b3ddd7c9235cea51a965582506fa6281bb298ddab782ff3edb3f9015da2468d4"}, "fixture-manifest-hash"},
+		{"new", oracleIdentity{"1.1.74", 298606, "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"}, "fixture-manifest-hash"},
+		{"unknown version", oracleIdentity{"1.1.75", 298606, "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"}, "fixture-oracle-identity"},
+		{"relabeled historical", oracleIdentity{"1.1.74", 297238, "b3ddd7c9235cea51a965582506fa6281bb298ddab782ff3edb3f9015da2468d4"}, "fixture-oracle-identity"},
+		{"mixed hash", oracleIdentity{"1.1.34", 297238, "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"}, "fixture-oracle-identity"},
+		{"mixed size", oracleIdentity{"1.1.74", 297238, "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"}, "fixture-oracle-identity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir, _ := writeSyntheticFixtureSet(t)
+			manifest := fixtureManifest{Version: test.identity.Version, Size: test.identity.Size, SHA256: test.identity.SHA256, Documents: map[string]string{}}
+			if err := os.WriteFile(filepath.Join(dir, "manifest.json"), canonicalBytes(t, manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if status := run(context.Background(), []string{"--fixtures", dir, "validate-fixtures"}, &out); status != 1 {
+				t.Fatalf("status = %d", status)
+			}
+			if !strings.Contains(out.String(), `"category":"`+test.category+`"`) {
+				t.Fatalf("safe output = %s", out.String())
+			}
+		})
+	}
+}
+
+func TestCaptureArgumentsAreExplicitAndRestricted(t *testing.T) {
+	if _, err := parseArgs([]string{"--wasm", "synthetic.wasm", "--fixtures", "synthetic-seeds", "--version", "1.1.74", "--output", "synthetic-new-directory", "capture-fixtures"}); err != nil {
+		t.Fatalf("explicit capture arguments rejected: %s", categoryOf(err))
+	}
+	for _, args := range [][]string{
+		{"capture-fixtures"},
+		{"--wasm", "synthetic.wasm", "--fixtures", "synthetic-seeds", "capture-fixtures"},
+		{"--wasm", "synthetic.wasm", "--fixtures", "synthetic-seeds", "--version", "unknown", "--output", "synthetic-new-directory", "capture-fixtures"},
+		{"--fixtures", "synthetic-seeds", "--output", "synthetic-new-directory", "validate-fixtures"},
+	} {
+		if _, err := parseArgs(args); err == nil {
+			t.Fatal("unsafe capture arguments accepted")
+		}
+	}
+}
 
 func TestDecodeResultLayoutsUsesObjectOffsetPlus12(t *testing.T) {
 	stringResult, err := decodeStringResult([]byte{1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0})

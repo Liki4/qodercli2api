@@ -6,11 +6,11 @@ import (
 	"os"
 )
 
-type commandArgs struct{ wasmPath, fixturePath, command string }
+type commandArgs struct{ wasmPath, fixturePath, command, version, outputPath string }
 
 func parseArgs(args []string) (commandArgs, error) {
 	var result commandArgs
-	for len(args) > 0 && args[0] != "verify-fixtures" && args[0] != "validate-fixtures" {
+	for len(args) > 0 && args[0] != "verify-fixtures" && args[0] != "validate-fixtures" && args[0] != "capture-fixtures" {
 		if len(args) < 2 {
 			return result, fail("arguments")
 		}
@@ -19,6 +19,10 @@ func parseArgs(args []string) (commandArgs, error) {
 			result.wasmPath = args[1]
 		case "--fixtures":
 			result.fixturePath = args[1]
+		case "--version":
+			result.version = args[1]
+		case "--output":
+			result.outputPath = args[1]
 		default:
 			return result, fail("arguments")
 		}
@@ -29,12 +33,15 @@ func parseArgs(args []string) (commandArgs, error) {
 	}
 	result.command = args[0]
 	switch result.command {
-	case "verify-fixtures":
-		if result.wasmPath == "" {
+	case "capture-fixtures":
+		if result.wasmPath == "" || result.outputPath == "" || result.version != upgradeVersion {
 			return result, fail("arguments")
 		}
-	case "validate-fixtures":
-		if result.wasmPath != "" {
+	case "verify-fixtures", "validate-fixtures":
+		if result.version != "" || result.outputPath != "" {
+			return result, fail("arguments")
+		}
+		if (result.command == "verify-fixtures") != (result.wasmPath != "") {
 			return result, fail("arguments")
 		}
 	default:
@@ -48,26 +55,48 @@ func run(ctx context.Context, args []string, out io.Writer) int {
 		emitStatus(out, statusLine{"verify-fixtures", "unavailable", "FAIL", categoryOf(err)})
 		return 2
 	}
-	fixtures, err := validateFixtureSet(parsed.fixturePath, pinnedPolicy())
-	if err != nil {
+	failed := func(err error) int {
 		emitStatus(out, statusLine{parsed.command, "unavailable", "FAIL", categoryOf(err)})
 		return 1
+	}
+	policy, err := policyForDirectory(parsed.fixturePath)
+	if err != nil {
+		return failed(err)
+	}
+	if parsed.command == "capture-fixtures" && policy.Identity != pinnedPolicy().Identity {
+		return failed(fail("capture-seed-identity"))
+	}
+	fixtures, err := validateFixtureSet(parsed.fixturePath, policy)
+	if err != nil {
+		return failed(err)
 	}
 	if parsed.command == "validate-fixtures" {
 		emitStatus(out, statusLine{"validate-fixtures", "static", "PASS", ""})
 		return 0
 	}
-	source, err := readBoundedRegularFile(parsed.wasmPath, pinnedWASMSize, "wasm-read")
+	if parsed.command == "capture-fixtures" {
+		policy, _ = policyForVersion(parsed.version)
+	}
+	source, err := readBoundedRegularFile(parsed.wasmPath, int64(policy.Identity.Size), "wasm-read")
 	if err == nil {
-		err = validateWASM(source)
+		err = validateWASMForIdentity(source, policy.Identity)
 	}
 	if err != nil {
-		emitStatus(out, statusLine{"verify-fixtures", "unavailable", "FAIL", categoryOf(err)})
-		return 1
+		return failed(err)
+	}
+	if parsed.command == "capture-fixtures" {
+		captured, err := captureFixtures(ctx, source, fixtures, policy.Identity)
+		if err != nil {
+			return failed(err)
+		}
+		if err := writeCapturedFixtures(parsed.outputPath, captured, policy.Identity); err != nil {
+			return failed(err)
+		}
+		emitStatus(out, statusLine{"capture-fixtures", "recorded-and-replayed", "PASS", ""})
+		return 0
 	}
 	if _, err = verifyFixtures(ctx, source, fixtures, out); err != nil {
-		emitStatus(out, statusLine{"verify-fixtures", "unavailable", "FAIL", categoryOf(err)})
-		return 1
+		return failed(err)
 	}
 	return 0
 }

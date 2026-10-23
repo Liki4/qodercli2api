@@ -30,6 +30,28 @@ PINNED_FIXTURE_HASHES = {
     "runtime-fields.json": "9ab327de55b7ece6d429783152b77298c3b0eb1a51776213741ba8784954aaf0",
 }
 
+# Historical benchmark/default identity is deliberately not the live version.
+ORACLE_REGISTRY = {
+    "1.1.34": (ORACLE_IDENTITY, PINNED_FIXTURE_HASHES),
+    "1.1.74": ({"version": "1.1.74", "size": 298606, "sha256": "6419471effa631519def7797d76d7ede38b9fcfa9a83c2148c8ef5d43355b43d"}, {
+        "compatibility.json": "867fc46e79433a4b5c0c18eda59118203a064884408b31c0d2f1cb28940ef320",
+        "credential.json": "f976e8464cc3984269fa986538892e231ce0763c757a3ca2175b995a8ecce6e2",
+        "infer-user-no-org.json": "65447bc0e8ec7be7f5687b04b7bbfe08d98b2aea1ec8e5dffe8171a897dfd668",
+        "infer-user.json": "a9e7341e45cc32a81ef814bd79bb8c833972796f7fe34d55e90cf36aeb11f549",
+        "model-cache.json": "0344ac2f3680cd29ea3fddd69d57ca5923ab0e3cf62891e29a16970a295e03a0",
+        "runtime-fields.json": "bbc45fab848a4aee116ed0670d51b0e14e66494c1ef4d8df9e0e2da6239eb734",
+    }),
+}
+
+
+def registered_policy(identity):
+    if not isinstance(identity, dict):
+        raise HarnessError("fixture-oracle-identity")
+    policy = ORACLE_REGISTRY.get(identity.get("version"))
+    if policy is None or identity != policy[0]:
+        raise HarnessError("fixture-oracle-identity")
+    return policy
+
 
 class HarnessError(Exception):
     def __init__(self, category):
@@ -49,10 +71,16 @@ def decode_object_result(data):
     return struct.unpack("<III", data[:12])
 
 
-def validate_wasm_bytes(data, expected_size=PINNED_WASM_SIZE, expected_sha256=PINNED_WASM_SHA256):
-    if len(data) != expected_size:
+def validate_wasm_bytes(data, identity=None):
+    if identity is not None:
+        registered_policy(identity)
+        candidates = [identity]
+    else:
+        candidates = [policy[0] for policy in ORACLE_REGISTRY.values()]
+    candidates = [candidate for candidate in candidates if len(data) == candidate["size"]]
+    if not candidates:
         raise HarnessError("wasm-identity-size")
-    if hashlib.sha256(data).hexdigest() != expected_sha256:
+    if not any(hashlib.sha256(data).hexdigest() == candidate["sha256"] for candidate in candidates):
         raise HarnessError("wasm-identity-sha256")
 
 
@@ -72,9 +100,10 @@ def read_bounded_regular_file(path, maximum, category):
     return data
 
 
-def load_authorized_wasm(path):
-    data = read_bounded_regular_file(path, PINNED_WASM_SIZE, "wasm-read")
-    validate_wasm_bytes(data)
+def load_authorized_wasm(path, identity=None):
+    maximum = identity["size"] if identity is not None else max(policy[0]["size"] for policy in ORACLE_REGISTRY.values())
+    data = read_bounded_regular_file(path, maximum, "wasm-read")
+    validate_wasm_bytes(data, identity)
     return data
 
 
@@ -527,8 +556,8 @@ def expected_authorization_payload(headers):
 
 def validate_fixture_schema(name, fixture):
     require_exact_keys(fixture, ("oracle", "input", "transcript", "expected"))
-    if fixture["oracle"] != ORACLE_IDENTITY:
-        raise HarnessError("fixture-oracle-identity")
+    identity, _ = registered_policy(fixture["oracle"])
+    version = identity["version"]
     transcript = fixture["transcript"]
     require_exact_keys(transcript, ("unix_milli", "entropy_reads"))
     if transcript["unix_milli"] is not None and not isinstance(transcript["unix_milli"], list):
@@ -569,7 +598,7 @@ def validate_fixture_schema(name, fixture):
     elif name in ("infer-user.json", "infer-user-no-org.json"):
         require_exact_keys(input_value, ("machine_id", "version", "user", "scene", "endpoint", "body_raw", "model_key", "model_source"))
         require_exact_keys(expected, ("url", "header", "body_string", "body_bytes"))
-        if input_value["machine_id"] != "00000000-1111-4222-8333-444444444444" or input_value["version"] != "1.1.34" or input_value["endpoint"] != "https://example.invalid/base":
+        if input_value["machine_id"] != "00000000-1111-4222-8333-444444444444" or input_value["version"] != version or input_value["endpoint"] != "https://example.invalid/base":
             raise HarnessError("fixture-synthetic-schema")
         if input_value["user"].get("uid") != "synthetic-user-0001":
             raise HarnessError("fixture-synthetic-schema")
@@ -600,10 +629,19 @@ def validate_fixture_schema(name, fixture):
                 "version": "v1",
                 "requestId": "8d8c8b8a-8988-4786-8584-838281807f7e",
                 "info": want_user["encrypt_user_info"],
-                "cosyVersion": "1.1.34",
+                "cosyVersion": version,
                 "ideVersion": "",
             }:
                 raise HarnessError("fixture-synthetic-schema")
+    elif name == "compatibility.json" and version == "1.1.74":
+        require_exact_keys(input_value, ("cases",))
+        require_exact_keys(expected, ("results",))
+        if len(input_value["cases"]) != 33 or len(expected["results"]) != 33:
+            raise HarnessError("fixture-synthetic-schema")
+        for case, result in zip(input_value["cases"], expected["results"]):
+            require_exact_keys(case, ("operation", "args"))
+            require_exact_keys(result, ("output", "decoded", "failed", "transcript"))
+            require_exact_keys(result["transcript"], ("unix_milli", "entropy_reads"))
     else:
         raise HarnessError("fixture-schema")
 
@@ -613,20 +651,21 @@ def validate_fixture_set(directory):
         present = {name for name in os.listdir(directory) if name.endswith(".json")}
     except OSError as error:
         raise HarnessError("fixture-read") from error
-    if present != FIXTURE_JSON_NAMES:
-        raise HarnessError("fixture-inventory")
     manifest_bytes, manifest = load_fixture_document(directory, "manifest.json")
     del manifest_bytes
     require_exact_keys(manifest, ("version", "size", "sha256", "documents"), "fixture-manifest-schema")
-    if {key: manifest[key] for key in ("version", "size", "sha256")} != ORACLE_IDENTITY:
-        raise HarnessError("fixture-oracle-identity")
-    if manifest["documents"] != PINNED_FIXTURE_HASHES:
+    identity, hashes = registered_policy({key: manifest[key] for key in ("version", "size", "sha256")})
+    if present != set(hashes) | {"manifest.json"}:
+        raise HarnessError("fixture-inventory")
+    if manifest["documents"] != hashes:
         raise HarnessError("fixture-manifest-hash")
     fixtures = {}
-    for name in FIXTURE_NAMES:
+    for name in hashes:
         encoded, fixture = load_fixture_document(directory, name)
-        if hashlib.sha256(encoded).hexdigest() != PINNED_FIXTURE_HASHES[name]:
+        if hashlib.sha256(encoded).hexdigest() != hashes[name]:
             raise HarnessError("fixture-document-hash")
+        if fixture.get("oracle") != identity:
+            raise HarnessError("fixture-oracle-identity")
         validate_fixture_schema(name, fixture)
         fixtures[name] = fixture
     runtime_expected = fixtures["runtime-fields.json"]["expected"]
@@ -696,6 +735,7 @@ def verify_infer_fixture(wasm, fixture, operation):
 
 
 def verify_fixtures(wasm_bytes, fixtures):
+    validate_wasm_bytes(wasm_bytes, fixtures["credential.json"]["oracle"])
     wasm = WasmBound(wasm_bytes)
 
     fixture = fixtures["credential.json"]
@@ -734,6 +774,48 @@ def verify_fixtures(wasm_bytes, fixtures):
 
     verify_infer_fixture(wasm, fixtures["infer-user.json"], "infer")
     verify_infer_fixture(wasm, fixtures["infer-user-no-org.json"], "infer-no-org")
+    if "compatibility.json" in fixtures:
+        verify_compatibility(wasm, fixtures["compatibility.json"], fixtures["infer-user-no-org.json"]["input"])
+
+
+def verify_compatibility(wasm, fixture, infer_input):
+    operations = {
+        "body-decode": "decrypt_server_response",
+        "credential-encrypt": "credential_storage_encrypt",
+        "credential-decrypt": "credential_storage_decrypt",
+        "runtime": "generate_runtime_auth_fields",
+        "model-decrypt": "model_cache_decrypt",
+    }
+    for case, expected in zip(fixture["input"]["cases"], fixture["expected"]["results"]):
+        operation = case["operation"]
+        order = [("entropy", 16), ("entropy", 109)] if operation in ("runtime", "body-roundtrip") else []
+        if operation == "body-roundtrip":
+            order += [("clock",), ("entropy", 16)]
+        replay = TranscriptReplay.from_fixture(expected["transcript"], order)
+        wasm.set_replay(replay)
+        output, decoded, failed = "", "", False
+        try:
+            if operation == "body-roundtrip":
+                context_ptr = wasm.new_context(infer_input["machine_id"], infer_input["version"], compact_json(infer_input["user"]), compact_json(infer_input["scene"]))
+                try:
+                    result_ptr = wasm.prepare_infer_request(context_ptr, infer_input["endpoint"], case["args"][0], "", "system")
+                    try:
+                        output = wasm.result_string("requestresult_body", result_ptr)
+                    finally:
+                        wasm.free_request_result(result_ptr)
+                finally:
+                    wasm.free_context(context_ptr)
+                decoded = wasm.call_str_fn("decrypt_server_response", output)
+            else:
+                output = wasm.call_str_fn(operations[operation], *case["args"])
+        except HarnessError as error:
+            if error.category != "wasm-result-error":
+                raise
+            failed = True
+        replay.exhausted()
+        if output != expected["output"] or decoded != expected["decoded"] or failed != expected["failed"]:
+            raise HarnessError("compatibility-output")
+    print(safe_line("compatibility", "cases:33", True))
 
 
 def isolated_go_environment(source=None):
@@ -799,6 +881,8 @@ def verify_with_go_backend(wasm_path, fixture_directory):
         {"operation": "infer", "transcript": "new[clock:0,entropy:16,109],prepare[clock:1,entropy:16]", "result": "PASS"},
         {"operation": "infer-no-org", "transcript": "new[clock:0,entropy:16,109],prepare[clock:1,entropy:16]", "result": "PASS"},
     ]
+    if "compatibility.json" in validate_fixture_set(fixture_directory):
+        expected_records.append({"operation": "compatibility", "transcript": "cases:33", "result": "PASS"})
     lines = parse_go_records(completed, expected_records, "backend-go-verify")
     for line in lines:
         print(line)
@@ -817,13 +901,30 @@ def run_guarded(action):
 
 
 def run_self_tests():
+    for version in ("1.1.34", "1.1.74"):
+        fixtures = validate_fixture_set(os.path.join(REPO_ROOT, "testdata", "protocol", version))
+        if fixtures["infer-user.json"]["input"]["version"] != version:
+            raise HarnessError("self-test-fixture-version")
+    for invalid in (
+        {**ORACLE_IDENTITY, "version": "unknown"},
+        {**ORACLE_IDENTITY, "version": "1.1.74"},
+        {**ORACLE_IDENTITY, "size": 298606},
+        {**ORACLE_IDENTITY, "sha256": ORACLE_REGISTRY["1.1.74"][0]["sha256"]},
+    ):
+        try:
+            registered_policy(invalid)
+        except HarnessError as error:
+            if error.category != "fixture-oracle-identity":
+                raise
+        else:
+            raise HarnessError("self-test-mixed-identity")
     encoded = struct.pack("<IIII", 11, 22, 33, 44)
     if decode_string_result(encoded) != (11, 22, 33, 44):
         raise HarnessError("self-test-string-layout")
     if decode_object_result(encoded[:12]) != (11, 22, 33):
         raise HarnessError("self-test-object-layout")
     try:
-        validate_wasm_bytes(b"abc", expected_size=3, expected_sha256=hashlib.sha256(b"abd").hexdigest())
+        validate_wasm_bytes(bytes(PINNED_WASM_SIZE))
     except HarnessError as error:
         if error.category != "wasm-identity-sha256":
             raise
@@ -930,10 +1031,10 @@ def main(argv=None):
         return run_guarded(run_self_tests)
 
     def verify():
-        wasm_bytes = load_authorized_wasm(args.wasm)
         fixture_directory = os.path.abspath(args.fixtures)
         validate_with_go_backend(fixture_directory)
         fixtures = validate_fixture_set(fixture_directory)
+        wasm_bytes = load_authorized_wasm(args.wasm, fixtures["credential.json"]["oracle"])
         if importlib.util.find_spec("wasmtime") is not None:
             verify_fixtures(wasm_bytes, fixtures)
         else:

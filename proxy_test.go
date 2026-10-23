@@ -493,7 +493,7 @@ func TestCallUpstreamPreparesAgainAfterRefresh(t *testing.T) {
 		URL: serverHTTP.URL + "/infer", Header: http.Header{"X-Prepared-By": {"new"}}, Body: []byte("new-body"),
 	}}}
 	factory := &fakeProtocolContextFactory{contexts: []protocolContext{newCtx}}
-	auth := &authManager{
+	auth := syntheticAuthManager(t, &authManager{
 		protocol: &protocolServices{
 			credentials:    &fakeCredentialCodec{encrypted: "synthetic-saved"},
 			runtimeFields:  &fakeRuntimeFieldGenerator{output: runtimeFieldOutput{EncryptUserInfo: "new-encrypted", Key: "new-key"}},
@@ -506,7 +506,7 @@ func TestCallUpstreamPreparesAgainAfterRefresh(t *testing.T) {
 			RefreshToken: "synthetic-old-refresh", ExpireTime: time.Now().Add(2 * time.Hour).Unix(),
 			EncryptUserInfo: "old-encrypted", Key: "old-key",
 		},
-	}
+	})
 	s := &server{auth: auth, httpc: serverHTTP.Client(), logf: func(string, ...any) {}}
 
 	resp, err := s.callUpstream(context.Background(), []byte("original"), &modelConfig{Key: "auto", Source: "system"}, "synthetic")
@@ -643,9 +643,9 @@ type modelListResponse struct {
 
 func TestHandleModelsReturnsFriendlyStableIDs(t *testing.T) {
 	catalog := []*modelConfig{
-		{Key: "qmodel_38max", DisplayName: "Qwen3.8-Max", MaxInputTokens: 1_000_000},
-		{Key: "auto", DisplayName: "Auto", MaxInputTokens: 180_000},
-		{Key: "gmodel", DisplayName: "GLM-5.3", MaxInputTokens: 200_000},
+		{Key: "qmodel_38max", DisplayName: "Qwen3.8-Max", MaxInputTokens: 1_000_000, Enable: true},
+		{Key: "auto", DisplayName: "Auto", MaxInputTokens: 180_000, Enable: true},
+		{Key: "gmodel", DisplayName: "GLM-5.3", MaxInputTokens: 200_000, Enable: true},
 	}
 	s := &server{models: newModelResolver(catalog, nil, "", "")}
 	recorder := httptest.NewRecorder()
@@ -686,11 +686,11 @@ func TestHandleModelsReturnsFriendlyStableIDs(t *testing.T) {
 
 func TestHandleModelsFallsBackToKeysForAmbiguousOrEmptyNames(t *testing.T) {
 	catalog := []*modelConfig{
-		{Key: "auto", DisplayName: "Auto", MaxInputTokens: 180_000},
-		{Key: "alpha", DisplayName: "Shared", MaxInputTokens: 180_000},
-		{Key: "beta", DisplayName: "Shared", MaxInputTokens: 180_000},
-		{Key: "raw", DisplayName: "   ", MaxInputTokens: 180_000},
-		{Key: "special", DisplayName: "Special[1m]", MaxInputTokens: 180_000},
+		{Key: "auto", DisplayName: "Auto", MaxInputTokens: 180_000, Enable: true},
+		{Key: "alpha", DisplayName: "Shared", MaxInputTokens: 180_000, Enable: true},
+		{Key: "beta", DisplayName: "Shared", MaxInputTokens: 180_000, Enable: true},
+		{Key: "raw", DisplayName: "   ", MaxInputTokens: 180_000, Enable: true},
+		{Key: "special", DisplayName: "Special[1m]", MaxInputTokens: 180_000, Enable: true},
 	}
 	s := &server{models: newModelResolver(catalog, nil, "", "")}
 	recorder := httptest.NewRecorder()
@@ -727,5 +727,32 @@ func TestHandleModelsFallsBackToKeysForAmbiguousOrEmptyNames(t *testing.T) {
 	}
 	if special.Name != "Special[1m]" || special.DisplayName != "Special[1m]" {
 		t.Errorf("special names = (%q, %q), want (Special[1m], Special[1m])", special.Name, special.DisplayName)
+	}
+}
+
+func TestHandleModelsExcludesDisabledEntries(t *testing.T) {
+	catalog := []*modelConfig{
+		{Key: "auto", DisplayName: "Auto", MaxInputTokens: 180_000, Enable: true},
+		{Key: "disabled", DisplayName: "Disabled", MaxInputTokens: 180_000},
+		{Key: "gmodel", DisplayName: "GLM-5.3", MaxInputTokens: 200_000, Enable: true},
+	}
+	s := &server{models: newModelResolver(catalog, nil, "", "")}
+	recorder := httptest.NewRecorder()
+
+	s.handleModels(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var response modelListResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	var ids []string
+	for _, item := range response.Data {
+		ids = append(ids, item.ID)
+	}
+	if want := []string{"Auto", "GLM-5.3"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("ids = %v, want %v (disabled entries must not be advertised)", ids, want)
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-const qoderProtocolVersion = "1.1.34"
+const qoderProtocolVersion = "1.1.74"
 
 type credentialCodec interface {
 	Encrypt(context.Context, string, string) (string, error)
@@ -13,10 +13,11 @@ type credentialCodec interface {
 }
 
 type runtimeFieldInput struct {
-	UID              string   `json:"uid"`
-	OrganizationID   string   `json:"organization_id"`
-	OrganizationTags []string `json:"organization_tags"`
-	DataPolicyAgreed bool     `json:"data_policy_agreed"`
+	UID                string   `json:"uid"`
+	SecurityOAuthToken string   `json:"security_oauth_token,omitempty"`
+	OrganizationID     string   `json:"organization_id"`
+	OrganizationTags   []string `json:"organization_tags"`
+	DataPolicyAgreed   bool     `json:"data_policy_agreed"`
 }
 
 type runtimeFieldOutput struct {
