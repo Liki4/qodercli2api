@@ -1,5 +1,11 @@
 # qodercli2api
 
+> [!IMPORTANT]
+> **维护状态与项目推荐**
+>
+> 本仓库目前维护不太活跃，更新和问题响应可能不够及时。
+> 如果你是新用户，建议优先考虑维护更活跃的 **[shuishuipingan/qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub)**；具体功能、部署方式与兼容性请以该仓库的说明为准。
+
 将 Qoder CLI 的模型推理能力接入 Claude Code、Codex 和其他 API 客户端的本地代理。
 提供 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 三类兼容接口，支持流式与非流式响应、工具调用转换和 thinking/effort 映射。
 
