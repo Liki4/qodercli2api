@@ -30,6 +30,7 @@ type respTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      *respToolFormat `json:"format,omitempty"`
 }
 
 type respInputItem struct {
@@ -39,7 +40,8 @@ type respInputItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Input     *string         `json:"input,omitempty"`
+	Output    *string         `json:"output,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Status    string          `json:"status,omitempty"`
 }
@@ -144,7 +146,14 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 				um.Contents = []upPart{{Type: "text", Text: txt}}
 			}
 			msgs = append(msgs, um)
-		case "function_call":
+		case "function_call", "custom_tool_call":
+			arguments := it.Arguments
+			if it.Type == "custom_tool_call" {
+				if it.Input == nil {
+					return "", nil, fmt.Errorf("custom_tool_call input must be a string")
+				}
+				arguments = encodeRespCustomInput(*it.Input)
+			}
 			if pendingAssistant == nil {
 				pendingAssistant = &upMessage{Role: "assistant", Content: ""}
 			}
@@ -152,11 +161,17 @@ func respToUpstream(instructions string, input json.RawMessage) (string, []upMes
 			tc.ID = it.CallID
 			tc.Type = "function"
 			tc.Function.Name = it.Name
-			tc.Function.Arguments = it.Arguments
+			tc.Function.Arguments = arguments
 			pendingAssistant.ToolCalls = append(pendingAssistant.ToolCalls, tc)
-		case "function_call_output":
+		case "function_call_output", "custom_tool_call_output":
+			output := ""
+			if it.Output != nil {
+				output = *it.Output
+			} else if it.Type == "custom_tool_call_output" {
+				return "", nil, fmt.Errorf("custom_tool_call_output output must be a string")
+			}
 			flushAssistant()
-			msgs = append(msgs, upMessage{Role: "tool", ToolCallID: it.CallID, Content: it.Output})
+			msgs = append(msgs, upMessage{Role: "tool", ToolCallID: it.CallID, Content: output})
 		case "reasoning", "item_reference":
 			// not forwarded upstream
 		default:
@@ -247,28 +262,6 @@ func parseRespParts(raw json.RawMessage) []respContentPart {
 	return parts
 }
 
-func respToolsToOAI(tools []respTool) []map[string]any {
-	out := make([]map[string]any, 0, len(tools))
-	for _, t := range tools {
-		if t.Type != "function" {
-			continue
-		}
-		params := t.Parameters
-		if len(params) == 0 {
-			params = json.RawMessage(`{"type":"object"}`)
-		}
-		out = append(out, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        t.Name,
-				"description": t.Description,
-				"parameters":  params,
-			},
-		})
-	}
-	return out
-}
-
 // ---------- Responses API emission ----------
 
 type respStreamState struct {
@@ -278,13 +271,13 @@ type respStreamState struct {
 	model      string
 	seq        int
 	outIndex   int
-	curKind    string // "", "reasoning", "message", "function_call"
+	curKind    string // "", "reasoning", "message", "pending_tool_call", "function_call", "custom_tool_call"
 	curItemID  string
-	fcCallID   string
-	fcName     string
+	toolKinds  respToolKinds
+	call       *respToolCall
+	failed     bool
 	textBuf    strings.Builder
 	reasonBuf  strings.Builder
-	argsBuf    strings.Builder
 	items      []map[string]any
 	inTok      int
 	outTok     int
@@ -319,7 +312,10 @@ func (st *respStreamState) baseResponse(status string) map[string]any {
 	}
 }
 
-func (st *respStreamState) closeItem() {
+func (st *respStreamState) closeItem() bool {
+	if st.failed {
+		return false
+	}
 	switch st.curKind {
 	case "reasoning":
 		full := st.reasonBuf.String()
@@ -348,29 +344,47 @@ func (st *respStreamState) closeItem() {
 		}
 		st.emit("response.output_item.done", map[string]any{"output_index": st.outIndex, "item": item})
 		st.items = append(st.items, item)
-	case "function_call":
-		full := st.argsBuf.String()
-		st.emit("response.function_call_arguments.done", map[string]any{
-			"item_id": st.curItemID, "output_index": st.outIndex, "arguments": full,
-		})
-		item := map[string]any{
-			"id": st.curItemID, "type": "function_call", "call_id": st.fcCallID,
-			"name": st.fcName, "arguments": full, "status": "completed",
+	case "pending_tool_call":
+		st.fail(errRespToolCall.Error())
+		return false
+	case "function_call", "custom_tool_call":
+		item, err := st.call.item(st.curItemID, st.toolKinds)
+		if err != nil {
+			st.fail(err.Error())
+			return false
+		}
+		if st.curKind == "custom_tool_call" {
+			// Buffer the transport JSON until validated. No escaped wrapper or
+			// incomplete executable input is exposed through custom deltas.
+			st.emit("response.custom_tool_call_input.delta", map[string]any{
+				"item_id": st.curItemID, "output_index": st.outIndex, "delta": item["input"],
+			})
+			st.emit("response.custom_tool_call_input.done", map[string]any{
+				"item_id": st.curItemID, "output_index": st.outIndex, "input": item["input"],
+			})
+		} else {
+			st.emit("response.function_call_arguments.done", map[string]any{
+				"item_id": st.curItemID, "output_index": st.outIndex, "arguments": item["arguments"],
+			})
 		}
 		st.emit("response.output_item.done", map[string]any{"output_index": st.outIndex, "item": item})
 		st.items = append(st.items, item)
+		st.call = nil
 	}
 	if st.curKind != "" {
 		st.outIndex++
 	}
 	st.curKind = ""
+	return true
 }
 
-func (st *respStreamState) openReasoning() {
+func (st *respStreamState) openReasoning() bool {
 	if st.curKind == "reasoning" {
-		return
+		return true
 	}
-	st.closeItem()
+	if !st.closeItem() {
+		return false
+	}
 	st.curKind = "reasoning"
 	st.curItemID = "rs_" + newUUIDShort()
 	st.reasonBuf.Reset()
@@ -382,13 +396,16 @@ func (st *respStreamState) openReasoning() {
 		"item_id": st.curItemID, "output_index": st.outIndex, "summary_index": 0,
 		"part": map[string]any{"type": "summary_text", "text": ""},
 	})
+	return true
 }
 
-func (st *respStreamState) openMessage() {
+func (st *respStreamState) openMessage() bool {
 	if st.curKind == "message" {
-		return
+		return true
 	}
-	st.closeItem()
+	if !st.closeItem() {
+		return false
+	}
 	st.curKind = "message"
 	st.curItemID = "msg_" + newUUIDShort()
 	st.textBuf.Reset()
@@ -403,34 +420,65 @@ func (st *respStreamState) openMessage() {
 		"item_id": st.curItemID, "output_index": st.outIndex, "content_index": 0,
 		"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 	})
+	return true
 }
 
-func (st *respStreamState) openFunctionCall(callID, name string) {
-	st.closeItem()
-	st.curKind = "function_call"
-	st.curItemID = "fc_" + newUUIDShort()
-	st.fcCallID, st.fcName = callID, name
-	st.argsBuf.Reset()
-	st.emit("response.output_item.added", map[string]any{
-		"output_index": st.outIndex,
-		"item": map[string]any{
-			"id": st.curItemID, "type": "function_call", "call_id": callID,
-			"name": name, "arguments": "", "status": "in_progress",
-		},
-	})
+func (st *respStreamState) handleToolCall(callID, name, args string) {
+	if st.call.startsNew(callID) && !st.closeItem() {
+		return
+	}
+	if st.call == nil {
+		if !st.closeItem() {
+			return
+		}
+		st.curKind = "pending_tool_call"
+		st.call = &respToolCall{}
+	}
+	if err := st.call.add(callID, name, args); err != nil {
+		st.fail(err.Error())
+		return
+	}
+	if st.curKind == "pending_tool_call" && st.call.ready() {
+		st.curKind = "function_call"
+		field := "arguments"
+		if st.toolKinds[st.call.name] == "custom" {
+			st.curKind, field = "custom_tool_call", "input"
+		}
+		st.curItemID = "fc_" + newUUIDShort()
+		st.emit("response.output_item.added", map[string]any{
+			"output_index": st.outIndex,
+			"item": map[string]any{
+				"id": st.curItemID, "type": st.curKind, "call_id": st.call.callID,
+				"name": st.call.name, field: "", "status": "in_progress",
+			},
+		})
+		// Include fragments that arrived before the ID/name, as well as any
+		// arguments attached to the first complete header.
+		args = st.call.args.String()
+	}
+	if st.curKind == "function_call" && args != "" {
+		st.emit("response.function_call_arguments.delta", map[string]any{
+			"item_id": st.curItemID, "output_index": st.outIndex, "delta": args,
+		})
+	}
 }
 
 func (st *respStreamState) handleChunk(c *upChunk) {
+	if st.failed {
+		return
+	}
+	if c.Usage != nil {
+		st.setUsage(c.Usage)
+	}
 	if len(c.Choices) == 0 {
-		if c.Usage != nil {
-			st.setUsage(c.Usage)
-		}
 		return
 	}
 	ch := c.Choices[0]
 	d := ch.Delta
 	if d.ReasoningContent != "" {
-		st.openReasoning()
+		if !st.openReasoning() {
+			return
+		}
 		st.reasonBuf.WriteString(d.ReasoningContent)
 		st.emit("response.reasoning_summary_text.delta", map[string]any{
 			"item_id": st.curItemID, "output_index": st.outIndex, "summary_index": 0,
@@ -438,7 +486,9 @@ func (st *respStreamState) handleChunk(c *upChunk) {
 		})
 	}
 	if d.Content != "" {
-		st.openMessage()
+		if !st.openMessage() {
+			return
+		}
 		st.textBuf.WriteString(d.Content)
 		st.emit("response.output_text.delta", map[string]any{
 			"item_id": st.curItemID, "output_index": st.outIndex, "content_index": 0,
@@ -446,31 +496,15 @@ func (st *respStreamState) handleChunk(c *upChunk) {
 		})
 	}
 	for _, tc := range d.ToolCalls {
-		if tc.ID != "" || tc.Function.Name != "" {
-			id, name := tc.ID, tc.Function.Name
-			if id == "" {
-				id = st.fcCallID
-			}
-			if name == "" {
-				name = st.fcName
-			}
-			st.openFunctionCall(id, name)
-		}
-		if tc.Function.Arguments != "" {
-			if st.curKind != "function_call" {
-				st.openFunctionCall(st.fcCallID, st.fcName)
-			}
-			st.argsBuf.WriteString(tc.Function.Arguments)
-			st.emit("response.function_call_arguments.delta", map[string]any{
-				"item_id": st.curItemID, "output_index": st.outIndex,
-				"delta": tc.Function.Arguments,
-			})
+		st.handleToolCall(tc.ID, tc.Function.Name, tc.Function.Arguments)
+		if st.failed {
+			return
 		}
 	}
 	if ch.FinishReason != nil && *ch.FinishReason != "" && *ch.FinishReason != "null" {
 		st.stopReason = *ch.FinishReason
-		if c.Usage != nil {
-			st.setUsage(c.Usage)
+		if st.call != nil {
+			st.closeItem()
 		}
 	}
 }
@@ -485,7 +519,9 @@ func (st *respStreamState) setUsage(u *upUsage) {
 }
 
 func (st *respStreamState) complete() {
-	st.closeItem()
+	if !st.closeItem() {
+		return
+	}
 	status := "completed"
 	var incomplete any
 	if st.stopReason == "length" {
@@ -509,6 +545,10 @@ func (st *respStreamState) complete() {
 }
 
 func (st *respStreamState) fail(msg string) {
+	if st.failed {
+		return
+	}
+	st.failed = true
 	resp := st.baseResponse("failed")
 	resp["error"] = map[string]any{"code": "server_error", "message": msg}
 	st.emit("response.failed", map[string]any{"response": resp})
@@ -557,11 +597,18 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if req.TopP != nil {
 		params["top_p"] = *req.TopP
 	}
+	tools, kinds, err := respToolsToOAI(req.Tools)
+	if err != nil {
+		writeOAIError(w, 400, "invalid_request_error", "", err.Error())
+		return
+	}
+	choice, err := respToolChoiceToOAI(req.ToolChoice, kinds)
+	if err != nil {
+		writeOAIError(w, 400, "invalid_request_error", "", err.Error())
+		return
+	}
 	if len(req.ToolChoice) > 0 {
-		var tc any
-		if json.Unmarshal(req.ToolChoice, &tc) == nil {
-			params["tool_choice"] = tc
-		}
+		params["tool_choice"] = choice
 	}
 	system, upMsgs, err := respToUpstream(req.Instructions, req.Input)
 	if err != nil {
@@ -569,7 +616,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID := newUUID()
-	body, err := remoteChatAskBody(system, upMsgs, respToolsToOAI(req.Tools), params, mc, s.sessionFor(req.Model), requestID)
+	body, err := remoteChatAskBody(system, upMsgs, tools, params, mc, s.sessionFor(req.Model), requestID)
 	if err != nil {
 		writeOAIError(w, 400, "invalid_request_error", "", err.Error())
 		return
@@ -591,13 +638,13 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	chunks, errc := upstreamChunks(r.Context(), resp.Body)
 	if req.Stream {
-		s.streamResponses(w, chunks, errc, &req, requestID)
+		s.streamResponses(w, chunks, errc, &req, requestID, kinds)
 	} else {
-		s.collectResponses(w, chunks, errc, &req, requestID)
+		s.collectResponses(w, chunks, errc, &req, requestID, kinds)
 	}
 }
 
-func (s *server) streamResponses(w http.ResponseWriter, chunks <-chan *upChunk, errc <-chan error, req *respRequest, requestID string) {
+func (s *server) streamResponses(w http.ResponseWriter, chunks <-chan *upChunk, errc <-chan error, req *respRequest, requestID string, kinds respToolKinds) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -607,12 +654,14 @@ func (s *server) streamResponses(w http.ResponseWriter, chunks <-chan *upChunk, 
 		return
 	}
 	w.WriteHeader(200)
-	st := &respStreamState{w: w, flusher: flusher, respID: "resp_" + newUUIDShort(), model: req.Model}
+	st := &respStreamState{w: w, flusher: flusher, respID: "resp_" + newUUIDShort(), model: req.Model, toolKinds: kinds}
 	created := st.baseResponse("in_progress")
 	st.emit("response.created", map[string]any{"response": created})
 	st.emit("response.in_progress", map[string]any{"response": created})
 	failed := ""
 	for c := range chunks {
+		// A conversion failure stops emission, not consumption: upstreamChunks
+		// must be drained so its producer cannot remain blocked on the channel.
 		st.handleChunk(c)
 	}
 	select {
@@ -630,15 +679,30 @@ func (s *server) streamResponses(w http.ResponseWriter, chunks <-chan *upChunk, 
 	s.logf("req %s usage input=%d cache_write=%d cache_read=%d output=%d%s", requestID[:8], st.inTok, st.cacheWrite, st.cacheRead, st.outTok, st.bill.billingLog())
 }
 
-func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk, errc <-chan error, req *respRequest, requestID string) {
+func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk, errc <-chan error, req *respRequest, requestID string, kinds respToolKinds) {
 	var textBuf, reasonBuf strings.Builder
-	type fc struct{ id, callID, name, args string }
-	var fcs []fc
-	cur := -1
+	var calls []map[string]any
+	var call *respToolCall
+	failed := ""
+	closeCall := func() {
+		if call == nil || failed != "" {
+			return
+		}
+		item, err := call.item("fc_"+newUUIDShort(), kinds)
+		if err != nil {
+			failed = err.Error()
+			return
+		}
+		calls = append(calls, item)
+		call = nil
+	}
 	stopReason := "stop"
 	inTok, outTok, cacheRead, cacheWrite := 0, 0, 0, 0
 	var bill *upUsage
 	for c := range chunks {
+		if failed != "" {
+			continue // Drain the existing producer even after conversion fails.
+		}
 		if c.Usage != nil {
 			cacheRead = c.Usage.cachedTokens()
 			cacheWrite = c.Usage.cacheWriteTokens()
@@ -651,31 +715,38 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 		}
 		ch := c.Choices[0]
 		d := ch.Delta
+		if d.ReasoningContent != "" || d.Content != "" {
+			closeCall()
+			if failed != "" {
+				continue
+			}
+		}
 		reasonBuf.WriteString(d.ReasoningContent)
 		textBuf.WriteString(d.Content)
 		for _, tc := range d.ToolCalls {
-			if tc.ID != "" || tc.Function.Name != "" {
-				fcs = append(fcs, fc{})
-				cur = len(fcs) - 1
-				if tc.ID != "" {
-					fcs[cur].callID = tc.ID
-				}
-				if tc.Function.Name != "" {
-					fcs[cur].name = tc.Function.Name
+			if call.startsNew(tc.ID) {
+				closeCall()
+				if failed != "" {
+					break
 				}
 			}
-			if tc.Function.Arguments != "" && cur >= 0 {
-				fcs[cur].args += tc.Function.Arguments
+			if call == nil {
+				call = &respToolCall{}
+			}
+			if err := call.add(tc.ID, tc.Function.Name, tc.Function.Arguments); err != nil {
+				failed = err.Error()
+				break
 			}
 		}
 		if ch.FinishReason != nil && *ch.FinishReason != "" && *ch.FinishReason != "null" {
 			stopReason = *ch.FinishReason
+			closeCall()
 		}
 	}
-	failed := ""
+	closeCall()
 	select {
 	case err := <-errc:
-		if err != nil {
+		if err != nil && failed == "" {
 			failed = err.Error()
 		}
 	default:
@@ -700,12 +771,7 @@ func (s *server) collectResponses(w http.ResponseWriter, chunks <-chan *upChunk,
 			}},
 		})
 	}
-	for _, f := range fcs {
-		items = append(items, map[string]any{
-			"id": "fc_" + newUUIDShort(), "type": "function_call", "call_id": f.callID,
-			"name": f.name, "arguments": f.args, "status": "completed",
-		})
-	}
+	items = append(items, calls...)
 	if items == nil {
 		items = []map[string]any{}
 	}

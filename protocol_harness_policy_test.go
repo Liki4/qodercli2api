@@ -586,6 +586,8 @@ func protocolHarnessResponsesStreamFrameValid(event string, payload []byte) bool
 		"response.reasoning_summary_text.done":   {},
 		"response.function_call_arguments.delta": {},
 		"response.function_call_arguments.done":  {},
+		"response.custom_tool_call_input.delta":  {},
+		"response.custom_tool_call_input.done":   {},
 		"response.completed":                     {},
 	})
 }
@@ -622,6 +624,10 @@ func TestAuthorizedHarnessResponsesStreamFramePolicy(t *testing.T) {
 	}{
 		{name: "created", event: "response.created", payload: []byte(`{"type":"response.created","response":{"object":"response"}}`), want: true},
 		{name: "output delta", event: "response.output_text.delta", payload: []byte(`{"type":"response.output_text.delta","delta":"synthetic"}`), want: true},
+		{name: "custom input delta", event: "response.custom_tool_call_input.delta", payload: []byte(`{"type":"response.custom_tool_call_input.delta","delta":"synthetic"}`), want: true},
+		{name: "custom input done", event: "response.custom_tool_call_input.done", payload: []byte(`{"type":"response.custom_tool_call_input.done","input":"synthetic"}`), want: true},
+		{name: "custom event mismatch", event: "response.custom_tool_call_input.done", payload: []byte(`{"type":"response.custom_tool_call_input.delta","delta":"synthetic"}`), want: false},
+		{name: "malformed custom input", event: "response.custom_tool_call_input.delta", payload: []byte(`{`), want: false},
 		{name: "completed", event: "response.completed", payload: []byte(`{"type":"response.completed","response":{"object":"response"}}`), want: true},
 		{name: "event mismatch", event: "response.completed", payload: []byte(`{"type":"response.created"}`), want: false},
 		{name: "failed response", event: "response.failed", payload: []byte(`{"type":"response.failed"}`), want: false},

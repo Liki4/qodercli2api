@@ -153,6 +153,12 @@ Q2A_API_KEY="${QODER2API_SK:?请设置与服务端相同的密钥}" codex
 
 [Codex 配置示例](examples/codex-config.toml) 另含 1M 上下文设置；它是客户端配置示例，不是账号已获 1M 权限的证明。
 
+Responses 接口支持普通 function 工具及 custom/freeform 工具（包括 Codex 的 `apply_patch`）。代理将 custom 输入临时包装成上游 function 的 `input` 字符串参数，返回时还原为 `custom_tool_call` 和原始文本；工具仍由客户端执行，代理不应用补丁。
+
+- custom 的 `text` / `grammar` 格式会转为输入说明；grammar 仅作为模型提示，不保证约束采样或语法合法。
+- 流式 custom 输入在该次调用参数完整、解包成功后发送，普通 function 参数与文本仍逐块输出。无效或截断的 custom 包装返回错误，不会作为成功的补丁调用下发。
+- 工具结果目前支持字符串，不支持多模态结果数组。此兼容性由合成离线回归测试验证，不代表已完成真实 Codex / Qoder 上游验收。
+
 ## 配置参考
 
 同一配置项通常按 **命令行 > 对应环境变量 > 默认值** 解析；区域和凭据目录规则见上文。
