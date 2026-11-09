@@ -1123,15 +1123,94 @@ func (a *authManager) deviceLogin(ctx context.Context, out io.Writer) error {
 	}
 }
 
+// authUserInfoProfile mirrors the official CLI's tolerant OpenAPI userinfo
+// decoder. The endpoint has returned several shapes over time: older responses
+// use uid/organization_id/organization_tags, while current responses use
+// id/username/avatar/organization and camelCase organization fields. Keep the
+// raw variants here and canonicalize once in normalize so callers only deal
+// with the stable userInfo field names.
 type authUserInfoProfile struct {
-	DataPolicyAgreed       *bool    `json:"data_policy_agreed"`
-	IsDataPolicyModifiable *bool    `json:"is_data_policy_modifiable"`
-	UID                    string   `json:"uid"`
-	Name                   string   `json:"name"`
-	Email                  string   `json:"email"`
-	OrgID                  string   `json:"organization_id"`
-	OrgName                string   `json:"organization_name"`
-	OrgTags                []string `json:"organization_tags"`
+	DataPolicyAgreed          *bool                     `json:"data_policy_agreed"`
+	IsDataPolicyModifiable    *bool                     `json:"is_data_policy_modifiable"`
+	IsPrivacyPolicyModifiable *bool                     `json:"is_privacy_policy_modifiable"`
+	UID                       string                    `json:"uid"`
+	ID                        string                    `json:"id"`
+	UserID                    string                    `json:"user_id"`
+	Name                      string                    `json:"name"`
+	UserName                  string                    `json:"username"`
+	UserNameSnake             string                    `json:"user_name"`
+	Email                     string                    `json:"email"`
+	AvatarURL                 string                    `json:"avatar_url"`
+	Avatar                    string                    `json:"avatar"`
+	OrgID                     string                    `json:"organization_id"`
+	OrgIDCamel                string                    `json:"orgId"`
+	OrgIDCamelAlt             string                    `json:"organizationId"`
+	OrgName                   string                    `json:"organization_name"`
+	OrgNameCamel              string                    `json:"orgName"`
+	OrgNameCamelAlt           string                    `json:"organizationName"`
+	Organization              *authUserInfoOrganization `json:"organization"`
+	OrgTags                   []string                  `json:"organization_tags"`
+}
+
+type authUserInfoOrganization struct {
+	ID               string   `json:"id"`
+	UID              string   `json:"uid"`
+	OrgID            string   `json:"org_id"`
+	OrgIDCamel       string   `json:"orgId"`
+	OrganizationID   string   `json:"organization_id"`
+	Name             string   `json:"name"`
+	OrgName          string   `json:"org_name"`
+	OrgNameCamel     string   `json:"orgName"`
+	OrganizationName string   `json:"organization_name"`
+	Tags             []string `json:"tags"`
+	OrganizationTags []string `json:"organization_tags"`
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyStrings(values ...[]string) []string {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+// normalize canonicalizes the alternate wire shapes into the fields consumed
+// by applyAuthUserInfoProfile and requestPATCandidate. Precedence follows the
+// official CLI: id, user_id, uid for identity; name, username, user_name for
+// the display name; camelCase then snake_case organization fields; and the
+// nested organization object as the final fallback.
+func (p *authUserInfoProfile) normalize() {
+	if p == nil {
+		return
+	}
+	p.UID = firstNonEmptyString(p.ID, p.UserID, p.UID)
+	p.Name = firstNonEmptyString(p.Name, p.UserName, p.UserNameSnake)
+	p.AvatarURL = firstNonEmptyString(p.AvatarURL, p.Avatar)
+	if p.IsDataPolicyModifiable == nil {
+		p.IsDataPolicyModifiable = p.IsPrivacyPolicyModifiable
+	}
+	orgID := firstNonEmptyString(p.OrgIDCamel, p.OrgID, p.OrgIDCamelAlt)
+	orgName := firstNonEmptyString(p.OrgNameCamel, p.OrgName, p.OrgNameCamelAlt)
+	tags := p.OrgTags
+	if org := p.Organization; org != nil {
+		orgID = firstNonEmptyString(orgID, org.OrgID, org.OrgIDCamel, org.OrganizationID, org.ID, org.UID)
+		orgName = firstNonEmptyString(orgName, org.OrgName, org.OrgNameCamel, org.OrganizationName, org.Name)
+		tags = firstNonEmptyStrings(tags, org.Tags, org.OrganizationTags)
+	}
+	p.OrgID, p.OrgName = orgID, orgName
+	if tags != nil {
+		p.OrgTags = tags
+	}
 }
 
 func (a *authManager) requestUserInfo(ctx context.Context, token string, held ...*credentialTxn) (authUserInfoProfile, error) {
@@ -1176,6 +1255,7 @@ func (a *authManager) requestUserInfo(ctx context.Context, token string, held ..
 	if err := json.Unmarshal(raw, &profile); err != nil {
 		return authUserInfoProfile{}, err
 	}
+	profile.normalize()
 	return profile, nil
 }
 
@@ -1197,6 +1277,9 @@ func applyAuthUserInfoProfile(ui *userInfo, profile authUserInfoProfile) {
 	}
 	if profile.Name != "" {
 		ui.Name = profile.Name
+	}
+	if profile.AvatarURL != "" {
+		ui.AvatarURL = profile.AvatarURL
 	}
 	if profile.OrgID != "" {
 		ui.OrgID, ui.OrgName = profile.OrgID, profile.OrgName
