@@ -438,10 +438,10 @@ func (am *authManager) requestPATCandidate(ctx context.Context, pat string, prev
 		if isAuthConflict(err) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("could not fetch user info after exchange")
+		return nil, fmt.Errorf("could not fetch user info after exchange: %w", err)
 	}
 	if profile.UID == "" {
-		return nil, fmt.Errorf("could not fetch user info after exchange")
+		return nil, fmt.Errorf("could not fetch user info after exchange: userinfo response missing user id")
 	}
 	applyAuthUserInfoProfile(candidate, profile)
 	return candidate, nil
